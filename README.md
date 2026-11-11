@@ -11,9 +11,9 @@
 </p>
 
 <p align="center">
-  <a href="https://sayef.github.io/kv0/">Docs</a> ·
-  <a href="https://sayef.github.io/kv0/getting-started/">Getting started</a> ·
-  <a href="https://sayef.github.io/kv0/concepts/">Concepts</a> ·
+  <a href="https://kv0.pages.dev/">Docs</a> ·
+  <a href="https://kv0.pages.dev/getting-started/">Getting started</a> ·
+  <a href="https://kv0.pages.dev/concepts/">Concepts</a> ·
   <a href="bench/MEMORY-REPORT.md">Benchmarks</a> ·
   <a href="CHANGELOG.md">Changelog</a>
 </p>
@@ -111,7 +111,7 @@ workload), reads, scans, S3 requests and crash recovery, and names where kv0 is 
 
 ## Documentation
 
-- [Docs](https://sayef.github.io/kv0/): getting started, concepts, guides, FAQ.
+- [Docs](https://kv0.pages.dev/): getting started, concepts, guides, FAQ.
 - [DESIGN.md](DESIGN.md): storage format, durability, compaction, concurrency, rejected
   alternatives.
 - [CONTRIBUTING.md](CONTRIBUTING.md): development setup and tests.
