@@ -1,0 +1,51 @@
+[build-system]
+requires = ["maturin>=1.8,<2"]
+build-backend = "maturin"
+
+[project]
+name = "kv0"
+description = "Ordered key-value store and experiment-tracking tables on Lance: local disk, S3, GCS, Azure or memory"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "Saiful Islam" }]
+requires-python = ">=3.11"
+keywords = ["key-value", "lance", "object-storage", "experiment-tracking", "embedded-database"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Rust",
+    "Topic :: Database :: Database Engines/Servers",
+    "Typing :: Typed",
+]
+dynamic = ["version"]
+
+[project.urls]
+Homepage = "https://github.com/sayef/kv0"
+Documentation = "https://github.com/sayef/kv0#readme"
+Changelog = "https://github.com/sayef/kv0/blob/main/CHANGELOG.md"
+Issues = "https://github.com/sayef/kv0/issues"
+
+[dependency-groups]
+dev = ["pytest>=8", "maturin>=1.8,<2", "ruff==0.17.4"]
+
+[tool.maturin]
+manifest-path = "crates/kv0-py/Cargo.toml"
+python-source = "crates/kv0-py/python"
+module-name = "kv0.kv0"
+features = ["pyo3/extension-module"]
+
+[tool.pytest.ini_options]
+testpaths = ["crates/kv0-py/tests"]
+
+[tool.ruff]
+line-length = 110
+
+[tool.ruff.format]
+# Python files only. The Markdown code blocks keep their hand-aligned comments, and some of them
+# hold `--8<--` snippet includes that are not Python.
+exclude = ["*.md"]

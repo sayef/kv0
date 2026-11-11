@@ -1,0 +1,14 @@
+{
+  "runs": 20,
+  "metrics": 10,
+  "steps": 5000,
+  "points": 1000000,
+  "python": "3.13.18",
+  "machine": "x86_64",
+  "track_points_s": 440188.79639332445,
+  "read_full_series_noindex_ms": 12.200273578055203,
+  "read_100_steps_noindex_ms": 10.955984801985323,
+  "optimize_s": 0.09888287098146975,
+  "read_full_series_indexed_ms": 9.319308318663388,
+  "read_100_steps_indexed_ms": 8.634814501274377
+}

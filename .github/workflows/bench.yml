@@ -1,0 +1,76 @@
+name: Benchmarks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bench-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_TARGET_DIR: ${{ github.workspace }}/target
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # The base-commit step below runs `git fetch origin`; nothing in this job uploads artifacts.
+          persist-credentials: true # zizmor: ignore[artipacked]
+      - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libprotobuf-dev
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - run: cargo install critcmp --locked
+
+      # Report-only: shared runners are noisy, so regressions never fail the build.
+      - name: Benchmark the base commit
+        continue-on-error: true
+        env:
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          if [ -z "$BASE_SHA" ] || [ "$BASE_SHA" = "0000000000000000000000000000000000000000" ]; then
+            echo "No base commit to compare against."
+            exit 0
+          fi
+          git fetch --no-tags --depth=1 origin "$BASE_SHA"
+          git worktree add "$RUNNER_TEMP/base" "$BASE_SHA"
+          if [ ! -f "$RUNNER_TEMP/base/crates/kv0/benches/kv.rs" ]; then
+            echo "The base commit has no benchmarks."
+            exit 0
+          fi
+          cd "$RUNNER_TEMP/base"
+          cargo bench -p kv0 --bench kv -- --save-baseline base
+
+      - name: Benchmark the head commit
+        continue-on-error: true
+        run: cargo bench -p kv0 --bench kv -- --save-baseline head
+
+      - name: Write the comparison to the job summary
+        if: always()
+        run: |
+          {
+            echo "## Benchmarks"
+            echo
+            if [ -d "$CARGO_TARGET_DIR/criterion" ] && critcmp --baselines | grep -qx base; then
+              echo "Base \`base\` against head \`head\`; changes under about 5% are usually runner noise."
+              echo
+              echo '```'
+              critcmp base head
+              echo '```'
+            elif [ -d "$CARGO_TARGET_DIR/criterion" ]; then
+              echo '```'
+              critcmp head
+              echo '```'
+            else
+              echo "No benchmark results."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

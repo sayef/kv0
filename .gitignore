@@ -1,0 +1,16 @@
+bench/eval/run.log
+bench/.venv-old/
+build
+dist
+.DS_Store
+*.egg-info
+*.eggs
+.idea
+__pycache__
+.pytest_cache
+site/
+*.so
+target-*/
+target/
+.venv/
+venv

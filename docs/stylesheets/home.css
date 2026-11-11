@@ -1,0 +1,212 @@
+/* The home page: banner, one paragraph, actions, code, measured facts. No decoration. */
+
+.kv-home {
+  background: var(--kv-surface);
+  color: var(--kv-ink);
+}
+[data-md-color-scheme="slate"] .kv-home {
+  background: var(--kv-ground);
+}
+.kv-wrap {
+  max-width: 61rem;
+  margin: 0 auto;
+  padding: 0 1rem;
+}
+[data-md-color-scheme="default"] .kv-only-dark,
+[data-md-color-scheme="slate"] .kv-only-light {
+  display: none;
+}
+
+.kv-hero {
+  padding: 2rem 0 2.4rem;
+  border-bottom: 1px solid var(--kv-border);
+  background: var(--kv-ground);
+}
+.kv-hero__mark {
+  display: none;
+  height: 2.4rem;
+  width: auto;
+}
+.kv-hero__banner {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-width: 48rem;
+  margin-left: -1.2rem;
+}
+.kv-lede {
+  max-width: 36rem;
+  margin: 0.6rem 0 1.2rem;
+  font-size: 1rem;
+  line-height: 1.6;
+  color: var(--kv-ink);
+}
+.kv-lede a {
+  color: var(--kv-accent);
+}
+.kv-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+}
+.kv-btn {
+  display: inline-flex;
+  align-items: center;
+  min-height: 2.2rem;
+  padding: 0 0.9rem;
+  border: 1px solid var(--kv-border);
+  border-radius: 6px;
+  color: var(--kv-ink);
+  font-size: 0.8rem;
+  font-weight: 600;
+  background: var(--kv-surface);
+}
+.kv-btn:hover {
+  background: var(--kv-step);
+  color: var(--kv-ink);
+}
+.kv-btn--solid {
+  background: var(--kv-accent);
+  border-color: var(--kv-accent);
+  color: var(--kv-on-accent);
+}
+.kv-btn--solid:hover {
+  background: var(--kv-accent);
+  color: var(--kv-on-accent);
+  filter: brightness(1.08);
+}
+
+.kv-section {
+  padding: 2.4rem 0;
+  border-bottom: 1px solid var(--kv-border);
+}
+.kv-section h2 {
+  margin: 0 0 0.4rem;
+  font-size: 1.2rem;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  line-height: 1.3;
+}
+.kv-sub {
+  max-width: 38rem;
+  margin: 0 0 1.2rem;
+  color: var(--kv-meta);
+  font-size: 0.8rem;
+  line-height: 1.6;
+}
+
+.kv-code-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+}
+.kv-code {
+  margin: 0;
+  border: 1px solid var(--kv-border);
+  border-radius: 8px;
+  background: var(--kv-ground);
+  overflow: hidden;
+}
+[data-md-color-scheme="slate"] .kv-code {
+  background: var(--kv-surface);
+}
+.kv-code figcaption {
+  padding: 0.4rem 0.8rem;
+  border-bottom: 1px solid var(--kv-border);
+  color: var(--kv-meta);
+  font-size: 0.7rem;
+  font-weight: 600;
+}
+.kv-code pre {
+  margin: 0;
+  padding: 0.8rem;
+  overflow-x: auto;
+  font-family: var(--md-code-font);
+  font-size: 0.68rem;
+  line-height: 1.55;
+  color: var(--kv-ink);
+}
+
+.kv-facts {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8rem;
+  font-variant-numeric: tabular-nums;
+}
+.kv-facts th,
+.kv-facts td {
+  padding: 0.55rem 0.6rem 0.55rem 0;
+  border-top: 1px solid var(--kv-border);
+  text-align: left;
+  vertical-align: baseline;
+}
+.kv-facts th {
+  font-weight: 600;
+  width: 32%;
+}
+.kv-facts td:nth-child(2) {
+  font-family: var(--md-code-font);
+  white-space: nowrap;
+  width: 22%;
+}
+.kv-facts td:last-child {
+  color: var(--kv-meta);
+}
+.kv-more {
+  margin: 0.9rem 0 0;
+  font-size: 0.8rem;
+}
+.kv-more a {
+  color: var(--kv-accent);
+}
+
+.kv-split {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 2rem;
+}
+.kv-list {
+  margin: 0.6rem 0 0;
+  padding-left: 1.1rem;
+  font-size: 0.8rem;
+  line-height: 1.6;
+}
+.kv-list li {
+  margin: 0.3rem 0;
+}
+.kv-list code,
+.kv-sub code {
+  font-family: var(--md-code-font);
+  font-size: 0.9em;
+  padding: 0.05em 0.3em;
+  border-radius: 4px;
+  background: var(--kv-step);
+}
+
+@media (max-width: 52rem) {
+  .kv-code-grid,
+  .kv-split {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .kv-facts th,
+  .kv-facts td {
+    display: block;
+    width: auto;
+    border-top: none;
+    padding: 0.1rem 0;
+  }
+  .kv-facts tr {
+    display: block;
+    padding: 0.6rem 0;
+    border-top: 1px solid var(--kv-border);
+  }
+  .kv-hero__banner {
+    display: none;
+  }
+  .kv-hero__mark:not(.kv-only-light):not(.kv-only-dark),
+  [data-md-color-scheme="default"] .kv-hero__mark.kv-only-light,
+  [data-md-color-scheme="slate"] .kv-hero__mark.kv-only-dark {
+    display: block;
+    margin-bottom: 0.4rem;
+  }
+}

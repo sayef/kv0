@@ -1,0 +1,108 @@
+{% extends "main.html" %}
+
+{% block tabs %}
+{{ super() }}
+<div class="kv-home">
+  <section class="kv-hero">
+    <div class="kv-wrap">
+      <img class="kv-hero__banner kv-only-light" src="{{ 'assets/banner-light.svg' | url }}" alt="kv0: an ordered key-value store on Lance, on any object store" width="1280" height="320">
+      <img class="kv-hero__banner kv-only-dark" src="{{ 'assets/banner-dark.svg' | url }}" alt="kv0: an ordered key-value store on Lance, on any object store" width="1280" height="320">
+      <img class="kv-hero__mark kv-only-light" src="{{ 'assets/wordmark.svg' | url }}" alt="kv0" width="180" height="64">
+      <img class="kv-hero__mark kv-only-dark" src="{{ 'assets/wordmark-dark.svg' | url }}" alt="kv0" width="180" height="64">
+      <p class="kv-lede">An embedded storage engine for Rust and Python. Keys sort byte-wise, batches commit
+        atomically and iterators seek, on a local disk or straight on S3, GCS or Azure. Every commit is a
+        <a href="https://lance.org">Lance</a> version, so several processes can write at once and any version
+        can be opened again.</p>
+      <div class="kv-actions">
+        <a class="kv-btn kv-btn--solid" href="{{ 'getting-started/' | url }}">Get started</a>
+        <a class="kv-btn" href="{{ 'concepts/' | url }}">Concepts</a>
+        <a class="kv-btn" href="https://github.com/sayef/kv0">GitHub</a>
+      </div>
+    </div>
+  </section>
+
+  <section class="kv-section">
+    <div class="kv-wrap">
+      <h2>The same store from Rust and Python</h2>
+      <p class="kv-sub">A database is a path or a URI. Writes are visible at once, logged locally before they
+        return, and committed to storage in batches.</p>
+      <div class="kv-code-grid">
+        <figure class="kv-code">
+          <figcaption>Python</figcaption>
+<pre><code>import kv0
+
+db = kv0.DB("s3://bucket/prefix/db")
+batch = kv0.WriteBatch()
+batch.put(b"run/7/loss/0003", b"0.25")
+batch.delete(b"run/7/tmp")
+db.write(batch)
+
+it = db.iteritems()
+it.seek(b"run/7/")
+for key, value in it:
+    ...</code></pre>
+        </figure>
+        <figure class="kv-code">
+          <figcaption>Rust</figcaption>
+<pre><code>use kv0::kv::{Db, Options, WriteBatch};
+
+let db = Db::open("/data/db", Options::default())?;
+let mut batch = WriteBatch::new();
+batch.put(b"run/7/loss/0003", b"0.25");
+batch.delete(b"run/7/tmp");
+db.write(batch)?;
+
+let mut it = db.iter();
+it.seek(b"run/7/");
+for (key, value) in it { /* ... */ }</code></pre>
+        </figure>
+      </div>
+    </div>
+  </section>
+
+  <section class="kv-section">
+    <div class="kv-wrap">
+      <h2>Measured, with the method</h2>
+      <p class="kv-sub">Medians of five runs on one machine (i5-13500, NVMe), local disk. The full tables, including
+        what got worse, are one link away.</p>
+      <table class="kv-facts">
+        <tbody>
+          <tr><th scope="row">Reopen 10M keys</th><td>705 ms, 1.0 GB</td><td>from a view snapshot; 5.4 s without one</td></tr>
+          <tr><th scope="row">100k values of 16 KiB, reopen</th><td>20 ms, 90 MB</td><td>large values stay in Lance until read</td></tr>
+          <tr><th scope="row">Seek + 100 × next</th><td>11 µs</td><td>p50, 1M keys</td></tr>
+          <tr><th scope="row">Tracker run, single puts</th><td>386k puts/s</td><td>520k puts into two databases, each logged before it returns</td></tr>
+          <tr><th scope="row">Crash recovery</th><td>218 ms</td><td>200k unflushed puts, all recovered</td></tr>
+        </tbody>
+      </table>
+      <p class="kv-more"><a href="{{ 'benchmarks/' | url }}">All benchmarks and the method</a></p>
+    </div>
+  </section>
+
+  <section class="kv-section">
+    <div class="kv-wrap kv-split">
+      <div>
+        <h2>Guarantees, written down</h2>
+        <ul class="kv-list">
+          <li>A write survives a killed process: it is in a local write-ahead log before the call returns.</li>
+          <li>A <code>WriteBatch</code> is atomic, for readers and in storage.</li>
+          <li>Writers on several machines append without coordination; conflicting keys resolve by sequence.</li>
+          <li>Every commit is a version; tagged versions survive cleanup.</li>
+        </ul>
+        <p class="kv-more"><a href="{{ 'concepts/' | url }}">Concepts</a> · <a href="{{ 'design/' | url }}">Design and guarantees</a></p>
+      </div>
+      <div>
+        <h2>Tracking tables</h2>
+        <ul class="kv-list">
+          <li>Runs, parameters and metric series in columnar tables on the same storage.</li>
+          <li>Step-range reads across many runs; automatic compaction while logging.</li>
+          <li>Async Rust API for servers, a small Python API for training code.</li>
+        </ul>
+        <p class="kv-more"><a href="{{ 'guides/tracking/' | url }}">Tracking guide</a></p>
+      </div>
+    </div>
+  </section>
+</div>
+{% endblock %}
+
+{% block site_nav %}{% endblock %}
+{% block content %}{% endblock %}

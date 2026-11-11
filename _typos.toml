@@ -1,0 +1,17 @@
+# Spell check (https://github.com/crate-ci/typos). Run with `pre-commit run typos --all-files`.
+
+[files]
+extend-exclude = [
+    # Generated or binary: fonts, images, SVG path data, lockfiles and benchmark output.
+    "*.woff2",
+    "*.png",
+    "*.svg",
+    "Cargo.lock",
+    "uv.lock",
+    "bench/results/*.json",
+    "bench/eval/*.jsonl",
+]
+
+# Changelog grouping regexes match `[Ss]upport` and `[Dd]elete`; typos sees `upport` and `elete`.
+[type.toml]
+extend-ignore-re = ['\[[A-Za-z]{2}\][a-z]+']

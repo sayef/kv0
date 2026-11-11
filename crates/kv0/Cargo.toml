@@ -1,0 +1,52 @@
+[package]
+name = "kv0"
+description = "Ordered key-value store and experiment-tracking tables on Lance: local disk, S3, GCS, Azure or memory"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/kv0"
+readme = "../../README.md"
+keywords = ["key-value", "lance", "object-storage", "experiment-tracking", "database"]
+categories = ["database-implementations", "data-structures"]
+exclude = ["tests/", "examples/", "benches/"]
+
+[package.metadata.docs.rs]
+all-features = true
+
+[features]
+default = ["aws", "gcp", "azure"]
+# Object store backends, passed through to Lance. Local files and `memory://` are always available.
+aws = ["lance/aws"]
+gcp = ["lance/gcp"]
+azure = ["lance/azure"]
+
+[dependencies]
+lance = { version = "14.0.2", default-features = false }
+lance-index = { version = "=14.0.2", default-features = false }
+arrow-array = "58"
+arrow-schema = "58"
+# Filtering record batches (records folding).
+arrow-select = "58"
+bytes = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+futures = { version = "0.3", default-features = false, features = ["std"] }
+parking_lot = "0.12"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["float_roundtrip", "preserve_order"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
+tracing = { version = "0.1", default-features = false, features = ["std"] }
+uuid = { version = "1", features = ["v7"] }
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "kv"
+harness = false

@@ -1,0 +1,1 @@
+{"runs": 2000, "points_per_run": 2000, "points": 4800000, "log_s": 62.72741775796749, "first_tenth_run_s": 0.02627045360975899, "last_tenth_run_s": 0.03847617497493047, "start_s": 11.352001523948275, "start_runs": 2000, "start_rss_mb": 942.2890625, "start_bulk_s": 0.07466402498539537, "start_bulk_counts": [2000, 2000, 6000, 6000]}

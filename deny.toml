@@ -1,0 +1,43 @@
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+# CI passes `--warn unmaintained`, so unmaintained crates are reported but do not fail the check.
+unmaintained = "all"
+yanked = "deny"
+ignore = [
+    { id = "RUSTSEC-2024-0436", reason = "paste is unmaintained; a compile-time dependency of Lance's dependencies" },
+    { id = "RUSTSEC-2023-0071", reason = "rsa has no fixed release; used by Lance's Azure and GCS request signing (via opendal/reqsign) with locally held keys, not to decrypt untrusted input" },
+]
+
+[licenses]
+version = 2
+confidence-threshold = 0.9
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    # tiny-keccak (compile-time, via const-random)
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    # option-ext (via dirs in lance-index); file-level copyleft, used unmodified
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Zlib",
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

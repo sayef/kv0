@@ -1,0 +1,34 @@
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    # Wait a week before proposing a new release, so a compromised or yanked one is caught upstream first.
+    cooldown:
+      default-days: 7
+    # Patch and minor updates arrive together; each major version gets its own pull request.
+    groups:
+      rust:
+        patterns: ["*"]
+        update-types: [minor, patch]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    cooldown:
+      default-days: 7
+  # docs/requirements.txt: the documentation site's build tools.
+  - package-ecosystem: pip
+    directory: /docs
+    schedule:
+      interval: monthly
+    cooldown:
+      default-days: 7
+  # uv.lock: the development tools (ruff, pytest, maturin) CI installs with `uv sync`.
+  - package-ecosystem: uv
+    directory: /
+    schedule:
+      interval: monthly
+    cooldown:
+      default-days: 7

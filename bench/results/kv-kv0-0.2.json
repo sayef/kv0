@@ -1,0 +1,19 @@
+{
+  "engine": "0.2.0",
+  "n": 100000,
+  "python": "3.13.18",
+  "machine": "x86_64",
+  "put_ops_s": 522730.3382495476,
+  "flush_after_put_s": 0.031950028031133115,
+  "batch_write_ops_s": 966396.5652452,
+  "get_ops_s": 1614807.6530434326,
+  "seek_plus_100_next_per_s": 53293.65743568821,
+  "full_scan_items_s": 8482700.281905286,
+  "put_wal_none_ops_s": 948169.0148444286,
+  "put_wal_batch_ops_s": 972306.6927545217,
+  "put_wal_always_ops_s": 164.9833927374231,
+  "put_wal_off_ops_s": 1286234.463470213,
+  "sync_put_ops_s": 117.17036791852662,
+  "reopen_s": 0.05405667598824948,
+  "disk_bytes": 7007329
+}

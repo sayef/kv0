@@ -1,0 +1,106 @@
+site_name: kv0
+site_description: "An ordered key-value store and experiment-tracking tables on Lance, on any object store."
+site_url: https://sayef.github.io/kv0/
+repo_url: https://github.com/sayef/kv0
+repo_name: sayef/kv0
+edit_uri: edit/main/docs/
+copyright: Copyright &copy; Saiful Islam. Released under the Apache License 2.0.
+
+theme:
+  name: material
+  custom_dir: overrides
+  logo: assets/wordmark.svg
+  favicon: assets/icon.svg
+  # Fonts are self-hosted from docs/assets/fonts (see stylesheets/extra.css); no font CDN.
+  font: false
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - navigation.footer
+    - navigation.indexes
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.tabs.link
+    - toc.follow
+  icon:
+    repo: fontawesome/brands/github
+
+extra_css:
+  - stylesheets/extra.css
+  - stylesheets/home.css
+
+plugins:
+  - search
+
+hooks:
+  - docs/hooks.py
+
+exclude_docs: |
+  hooks.py
+  __pycache__/
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight
+  - pymdownx.inlinehilite
+  - pymdownx.snippets:
+      base_path: ["."]
+      check_paths: true
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+
+validation:
+  omitted_files: warn
+  absolute_links: warn
+  unrecognized_links: warn
+  anchors: warn
+
+nav:
+  - Home: index.md
+  - Getting started: getting-started.md
+  - Concepts: concepts.md
+  - Guides:
+      - Key-value API: guides/key-value.md
+      - Storage backends: guides/storage.md
+      - Tracking tables: guides/tracking.md
+      - Configuration: guides/configuration.md
+      - Operations and cleanup: guides/operations.md
+  - Benchmarks: benchmarks.md
+  - Design:
+      - Design and guarantees: design.md
+      - Architecture: architecture.md
+      - "Experiment: SQLite tier": design/sqlite-tier-experiment.md
+  - About:
+      - FAQ: faq.md
+      - Changelog: changelog.md
+      - Contributing: contributing.md
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/sayef/kv0

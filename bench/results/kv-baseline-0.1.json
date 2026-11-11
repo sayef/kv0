@@ -1,0 +1,15 @@
+{
+  "engine": "0.1 (pure Python + SQLite)",
+  "n": 100000,
+  "python": "3.13.18",
+  "machine": "x86_64",
+  "put_ops_s": 10587.79316624524,
+  "flush_after_put_s": 0.011678438982926309,
+  "batch_write_ops_s": 39854.78891644782,
+  "get_ops_s": 215787.44066836435,
+  "seek_plus_100_next_per_s": 12572.929167910186,
+  "full_scan_items_s": 552086.5228462997,
+  "sync_put_ops_s": 13467.009410466655,
+  "reopen_s": 0.00028846797067672014,
+  "disk_bytes": 14622720
+}

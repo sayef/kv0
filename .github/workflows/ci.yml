@@ -1,0 +1,163 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # S3-compatible server for the object-store tests (MinIO no longer publishes public images).
+  KV0_TEST_S3_ENDPOINT: http://127.0.0.1:9000
+  KV0_TEST_S3_BUCKET: kv0-test
+
+jobs:
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Scan the whole history for secrets
+        env:
+          GITLEAKS: "8.21.2"
+        run: |
+          base=https://github.com/gitleaks/gitleaks/releases/download/v$GITLEAKS
+          curl -sSfLO "$base/gitleaks_${GITLEAKS}_linux_x64.tar.gz"
+          curl -sSfL "$base/gitleaks_${GITLEAKS}_checksums.txt" | sha256sum -c --ignore-missing
+          tar xzf "gitleaks_${GITLEAKS}_linux_x64.tar.gz" gitleaks
+          ./gitleaks git --redact --no-banner -v .
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libprotobuf-dev
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2
+        with:
+          tool: cargo-machete@0.9.2
+      - name: Unused dependencies
+        run: cargo machete
+
+  # The pre-commit hooks that need no Rust toolchain, with ruff at the version in uv.lock.
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+      - run: uv sync --locked --no-install-project
+      - run: uv run --no-sync ruff check
+      - run: uv run --no-sync ruff format --check
+      - name: Spelling, workflows (actionlint, zizmor) and file hygiene
+        env:
+          # cargo fmt and clippy run in `lint`, gitleaks in `secrets`, ruff in the steps above.
+          SKIP: cargo-fmt,cargo-clippy,gitleaks,ruff-check,ruff-format
+        run: uvx pre-commit@4.7.0 run --all-files --show-diff-on-failure
+
+  deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
+        with:
+          command: check
+          command-arguments: --warn unmaintained
+
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libprotobuf-dev
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: 1.94.1
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - run: cargo check --workspace --all-targets
+
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+        include:
+          # Parallel builds of Lance's test binaries need more than the runner's memory.
+          - os: ubuntu-24.04-arm
+            jobs: 2
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libprotobuf-dev
+      - if: runner.os == 'macOS'
+        run: brew install protobuf
+      - if: runner.os == 'Linux'
+        name: Start an S3-compatible server
+        run: .github/scripts/s3-server.sh
+      - if: runner.os != 'Linux'
+        run: echo "KV0_TEST_S3_ENDPOINT=" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - run: cargo test -p kv0 ${{ matrix.jobs && format('-j {0}', matrix.jobs) || '' }}
+      - run: cargo test -p kv0 --doc
+
+  python:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.11", "3.13"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+        with:
+          python-version: ${{ matrix.python }}
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libprotobuf-dev
+      - if: runner.os == 'macOS'
+        run: brew install protobuf
+      - if: runner.os == 'Linux'
+        name: Start an S3-compatible server
+        run: .github/scripts/s3-server.sh
+      - if: runner.os != 'Linux'
+        run: echo "KV0_TEST_S3_ENDPOINT=" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - run: uv sync --locked --no-install-project
+      # A debug build: release builds of Lance with LTO take far longer than the tests.
+      - run: uv run --no-sync maturin build -o dist
+      - run: uv pip install --no-index --find-links dist kv0
+      - run: uv run --no-sync pytest crates/kv0-py/tests
+      - run: uv run --no-sync python crates/kv0-py/examples/quickstart.py && uv run --no-sync python crates/kv0-py/examples/tracking.py

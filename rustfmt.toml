@@ -1,0 +1,2 @@
+# rustfmt defaults are good; we only pin the edition. `cargo fmt` already sorts imports.
+edition = "2021"

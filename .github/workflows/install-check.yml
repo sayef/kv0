@@ -1,0 +1,87 @@
+name: Install check
+
+# Installs a published release from PyPI and crates.io, as users do, on old and current platforms.
+on:
+  workflow_call:
+    inputs:
+      tag:
+        type: string
+        required: true
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to install, e.g. v0.2.0
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  pip:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: "Linux x64, Python 3.11", os: ubuntu-latest, python: "3.11" }
+          - { name: "Linux x64, Python 3.13", os: ubuntu-latest, python: "3.13" }
+          - { name: "Linux arm64", os: ubuntu-24.04-arm, python: "3.12" }
+          - { name: "macOS arm64", os: macos-latest, python: "3.12" }
+          - { name: "Debian 12", os: ubuntu-latest, container: "python:3.11-slim-bookworm" }
+          - { name: "Alpine (musl)", os: ubuntu-latest, container: "python:3.12-alpine" }
+    name: pip, ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    container: ${{ matrix.container }}
+    steps:
+      - if: ${{ !matrix.container }}
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install from PyPI and use it
+        env:
+          TAG: ${{ inputs.tag }}
+        shell: sh
+        run: |
+          version="${TAG#v}"
+          # A fresh upload can take a few minutes to reach every PyPI mirror.
+          for _ in 1 2 3 4 5 6 7 8 9 10; do
+            pip install --only-binary=:all: --no-cache-dir "kv0==$version" && break
+            sleep 30
+          done
+          python -c "
+          import importlib.metadata as m, tempfile, kv0
+          from kv0.tracking import Repo
+          assert m.version('kv0') == '$version'
+          d = tempfile.mkdtemp()
+          db = kv0.DB(d + '/kv')
+          db.put(b'k', b'v', sync=True)
+          assert kv0.DB(d + '/kv', read_only=True).get(b'k') == b'v'
+          repo = Repo(d + '/repo')
+          run = repo.create_run(name='check')
+          run.track(1.0, name='loss')
+          assert repo.metric(run.id, 'loss')['values'] == [1.0]
+          print('kv0', m.version('kv0'), 'ok')
+          "
+
+  cargo:
+    name: cargo add (Rust 1.94.1)
+    runs-on: ubuntu-latest
+    steps:
+      - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libprotobuf-dev
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: 1.94.1
+      - name: Build a project that depends on the release
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          cargo new --bin check && cd check
+          cargo add "kv0@=${TAG#v}"
+          cat > src/main.rs <<'RS'
+          fn main() {
+              let db = kv0::kv::Db::open("memory://check", Default::default()).unwrap();
+              db.put(b"k", b"v").unwrap();
+              assert_eq!(db.get(b"k").unwrap().as_deref(), Some(&b"v"[..]));
+              println!("ok");
+          }
+          RS
+          cargo run -q
