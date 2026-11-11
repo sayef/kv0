@@ -1,6 +1,6 @@
 site_name: kv0
 site_description: "An ordered key-value store and experiment-tracking tables on Lance, on any object store."
-site_url: https://sayef.github.io/kv0/
+site_url: https://kv0.pages.dev/
 repo_url: https://github.com/sayef/kv0
 repo_name: sayef/kv0
 edit_uri: edit/main/docs/
