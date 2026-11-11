@@ -154,20 +154,23 @@ pub(crate) async fn migrate_paths(root: &str, opts: &StorageOptions) -> Result<V
         )));
     }
     let base = std::path::PathBuf::from(dir.strip_prefix("file://").unwrap_or(&dir));
-    // Another process may be migrating the same repository: a source already gone or a target
-    // already there means that step is done.
-    let done = |r: std::io::Result<()>| match r {
+    // Another process may be migrating the same repository at the same time. A step that fails
+    // while the other process completes it is judged by its outcome, not by the error: operating
+    // systems report these races differently (macOS answers a rename racing a removal with
+    // EINVAL, Linux with ENOENT or ENOTEMPTY).
+    let moved_to = |r: std::io::Result<()>, from: &std::path::Path, to: &std::path::Path| match r {
         Ok(()) => Ok(()),
-        Err(e)
-            if matches!(
-                e.kind(),
-                std::io::ErrorKind::NotFound
-                    | std::io::ErrorKind::AlreadyExists
-                    | std::io::ErrorKind::DirectoryNotEmpty
-            ) =>
-        {
-            Ok(())
-        }
+        Err(_) if !from.exists() && to.exists() => Ok(()),
+        Err(e) => Err(Error::Io(e.to_string())),
+    };
+    let gone = |r: std::io::Result<()>, path: &std::path::Path| match r {
+        Ok(()) => Ok(()),
+        Err(_) if !path.exists() => Ok(()),
+        Err(e) => Err(Error::Io(e.to_string())),
+    };
+    let created = |r: std::io::Result<()>, path: &std::path::Path| match r {
+        Ok(()) => Ok(()),
+        Err(_) if path.is_dir() => Ok(()),
         Err(e) => Err(Error::Io(e.to_string())),
     };
     let mut moved = Vec::new();
@@ -178,7 +181,8 @@ pub(crate) async fn migrate_paths(root: &str, opts: &StorageOptions) -> Result<V
         };
         let to = base.join(format!("{}.lance", encode(&table)));
         if !to.exists() {
-            done(std::fs::rename(base.join(n), &to))?;
+            let from = base.join(n);
+            moved_to(std::fs::rename(&from, &to), &from, &to)?;
         }
         moved.push(table);
     }
@@ -194,15 +198,16 @@ pub(crate) async fn migrate_paths(root: &str, opts: &StorageOptions) -> Result<V
             .join("_refs")
             .join("tags");
         if let Ok(rd) = std::fs::read_dir(&from) {
-            done(std::fs::create_dir_all(&to))?;
+            created(std::fs::create_dir_all(&to), &to)?;
             for e in rd.flatten() {
                 let dst = to.join(e.file_name());
                 if !dst.exists() {
-                    done(std::fs::rename(e.path(), dst))?;
+                    moved_to(std::fs::rename(e.path(), &dst), &e.path(), &dst)?;
                 }
             }
         }
-        done(std::fs::remove_dir_all(base.join(n)))?;
+        let stray = base.join(n);
+        gone(std::fs::remove_dir_all(&stray), &stray)?;
     }
     Ok(moved)
 }
