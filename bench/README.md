@@ -1,6 +1,7 @@
 # Benchmarks
 
-The evaluation of 0.2 against 0.1 (workloads, method, statistics, verdict) is
+The evaluation of kv0 against the pure-Python prototype it replaced (workloads, method, statistics,
+verdict) is
 [REPORT.md](https://github.com/sayef/kv0/blob/main/bench/REPORT.md), produced by `bench/eval/`:
 
 ```sh
@@ -9,7 +10,7 @@ python bench/eval/report.py           # bench/REPORT.md and bench/eval/charts/*.
 ```
 
 [MEMORY-REPORT.md](https://github.com/sayef/kv0/blob/main/bench/MEMORY-REPORT.md) compares this
-build with a baseline build of 0.2 on memory and reopen:
+build with a baseline build of kv0 on memory and reopen:
 
 ```sh
 KV0_EVAL_BASE_PY=.venv-base/bin/python python bench/eval/run_all.py --plan compare \
@@ -26,9 +27,9 @@ Two benchmarks, both on synthetic data:
 
 - `bench_kv.py`: the key-value API (`put`, batched `write`, `get`, `seek` plus 100 `next()`, full scan,
   flush, reopen and size on disk) with tracker-shaped keys (`seqs/chunks/run0007/metric03/val/<step>`)
-  and 8-byte values. The same script runs against this release and against the 0.1 baseline (pure
-  Python on a SQLite cache), each in its own environment; set
-  `KV0_BASELINE_MODULE` to the baseline's import name.
+  and 8-byte values. The same script runs against this release and against the pure-Python prototype
+  (on a SQLite cache), each in its own environment; set
+  `KV0_BASELINE_MODULE` to the prototype's import name.
 - `bench_tracking.py`: the tracking tables. Many runs track many metrics with an explicit step and a
   context, then whole series and 100-step windows are read before and after `optimize()`.
 

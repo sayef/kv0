@@ -18,6 +18,8 @@ git_tag_enable = true
 git_tag_name = "v{{ version }}"
 git_release_enable = true
 git_release_name = "v{{ version }}"
+# A version with a pre-release part (0.1.0-beta.1) becomes a GitHub pre-release.
+git_release_type = "auto"
 
 # Versioned through the workspace version, built and published to PyPI by release.yml.
 [[package]]

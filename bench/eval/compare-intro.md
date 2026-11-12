@@ -5,7 +5,7 @@ the last remeasurement of the bulk, large-value and reopen cells started at a lo
 and ended at 3, which widens the write-throughput ranges; the memory and reopen results do not
 depend on it.
 
-- **before**: kv0 0.2 before these changes: the view as a `BTreeMap` of shared byte buffers, every value
+- **before**: kv0 before these changes: the view as a `BTreeMap` of shared byte buffers, every value
   in memory, every open a full scan of the dataset.
 - **after**: with these changes: one allocation per view entry, values over 4 KiB left in Lance
   (`lazy_value_threshold`) behind a 64 MiB cache, rows applied batch by batch while loading, and

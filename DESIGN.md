@@ -476,7 +476,7 @@ A tracker with a Rust server should depend on the `kv0` crate directly:
 
 ## Settled decisions
 
-These are fixed for 0.2:
+These are fixed for the first release, 0.1.0:
 
 - Read-only handles now reject writes (`NotSupported`) instead of keeping them locally.
 - Opening a database that does not exist read-only raises `NotFound`.
@@ -485,4 +485,5 @@ These are fixed for 0.2:
   default), but only on the same machine.
 - Versions older than 7 days are cleaned up automatically (`version_retention`).
 - Python 3.11 or newer (abi3 wheel).
-- Version 0.2.0, licence unchanged (Apache-2.0).
+- Versioned from 0.1.0, with betas (0.1.0-beta.N) first; the pure-Python prototype before it was
+  never published. Licence unchanged (Apache-2.0).

@@ -19,8 +19,8 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 CHARTS = HERE / "charts"
 
-ACCENT = "#1A6E70"  # kv0 0.2
-NEUTRAL = "#ADB5BA"  # the 0.1 baseline
+ACCENT = "#1A6E70"  # kv0
+NEUTRAL = "#ADB5BA"  # the pure-Python prototype
 INK, MUTED, GRID = "#1B1F22", "#5E676D", "#D9DEE1"
 
 # (kind, label, path into the result, unit, higher_is_better)
@@ -69,8 +69,8 @@ METRICS = [
 ]
 
 PAIRS = [
-    ("v01", "v02", 'local, 0.2 default (wal_sync="batch")'),
-    ("v01", "v02-always", 'local, 0.2 wal_sync="always"'),
+    ("v01", "v02", 'local, kv0 default (wal_sync="batch")'),
+    ("v01", "v02-always", 'local, kv0 wal_sync="always"'),
     ("v01-s3", "v02-s3", "S3 (RustFS)"),
 ]
 
@@ -138,7 +138,7 @@ def compare(a, b, higher):
     return text, ("**better**" if better > 1 else "**worse**")
 
 
-def table(cells, kinds, pair, names=("baseline 0.1", "kv0 0.2")):
+def table(cells, kinds, pair, names=("prototype", "kv0")):
     a_eng, b_eng, _ = pair
     out = [
         f"| Workload | Size | {names[0]} median [min–max] | {names[1]} median [min–max] | Change | Verdict |",
@@ -168,7 +168,7 @@ def table(cells, kinds, pair, names=("baseline 0.1", "kv0 0.2")):
 
 
 def bar_chart(name, title, groups, unit, log=False):
-    """groups: [(label, {series: stats})]; series 'baseline 0.1' and 'kv0 0.2'."""
+    """groups: [(label, {series: stats})]; series 'prototype' and 'kv0'."""
     import math
 
     w, row, top, left = 720, 46, 56, 250
@@ -201,7 +201,7 @@ def bar_chart(name, title, groups, unit, log=False):
     for i, (label, series) in enumerate(groups):
         y = top + i * row
         parts.append(f'<text x="{left - 10}" y="{y + 20}" text-anchor="end" fill="{INK}">{label}</text>')
-        for j, (sname, color) in enumerate((("baseline 0.1", NEUTRAL), ("kv0 0.2", ACCENT))):
+        for j, (sname, color) in enumerate((("prototype", NEUTRAL), ("kv0", ACCENT))):
             s = series.get(sname)
             if not s:
                 continue
@@ -221,9 +221,9 @@ def bar_chart(name, title, groups, unit, log=False):
     ly = h - 16
     parts.append(
         f'<rect x="{left}" y="{ly - 10}" width="12" height="12" rx="3" fill="{NEUTRAL}"/>'
-        f'<text x="{left + 18}" y="{ly}" fill="{INK}">baseline 0.1 (SQLite cache)</text>'
+        f'<text x="{left + 18}" y="{ly}" fill="{INK}">prototype (SQLite cache)</text>'
         f'<rect x="{left + 110}" y="{ly - 10}" width="12" height="12" rx="3" fill="{ACCENT}"/>'
-        f'<text x="{left + 128}" y="{ly}" fill="{INK}">kv0 0.2</text>'
+        f'<text x="{left + 128}" y="{ly}" fill="{INK}">kv0</text>'
     )
     parts.append("</svg>")
     CHARTS.mkdir(exist_ok=True)
@@ -237,8 +237,8 @@ def charts(cells):
     def g(kind, engines, size, path):
         a, b = engines
         return {
-            "baseline 0.1": stats([get(r, path) for r in cells.get((kind, a, size), [])]),
-            "kv0 0.2": stats([get(r, path) for r in cells.get((kind, b, size), [])]),
+            "prototype": stats([get(r, path) for r in cells.get((kind, a, size), [])]),
+            "kv0": stats([get(r, path) for r in cells.get((kind, b, size), [])]),
         }
 
     out.append(
@@ -346,7 +346,7 @@ def main():
     verdict = (HERE / "report-verdict.md").read_text() if (HERE / "report-verdict.md").exists() else ""
     reps = sorted({len(v) for v in cells.values()})
     parts = [
-        "# kv0 0.2 against 0.1: evaluation",
+        "# kv0 against the pure-Python prototype: evaluation",
         "",
         intro,
         (

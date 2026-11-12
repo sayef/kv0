@@ -2,7 +2,7 @@
 
 Key-value, 100,000 keys:
 
-| Operation | baseline 0.1 | kv0 0.2 | Change |
+| Operation | prototype | kv0 | Change |
 |---|---:|---:|---:|
 | put (one key per call) | 10,588 ops/s | 522,730 ops/s | 49.4× faster |
 | put with sync=True (durable per call) | 13,467 ops/s | 117 ops/s | 115× slower |
@@ -16,7 +16,7 @@ Key-value, 100,000 keys:
 
 Write-ahead log modes, with a buffer that never fills (no Lance commits during the run), so the rows isolate the cost of the log:
 
-| put (one key per call), 0.2 | ops/s |
+| put (one key per call), kv0 | ops/s |
 |---|---:|
 | WAL off | 1,286,234 |
 | wal_sync="none" (no fsync) | 948,169 |

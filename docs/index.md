@@ -8,3 +8,5 @@ hide:
 ---
 
 # kv0
+
+kv0 is in beta: the API may still change before 0.1.0.

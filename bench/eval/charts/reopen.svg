@@ -30,5 +30,5 @@
 <rect x="250.0" y="216" width="325.8" height="14" rx="3" fill="#1A6E70"/>
 <line x1="575.0" x2="577.6" y1="223" y2="223" stroke="#1B1F22" stroke-width="1.5"/>
 <text x="583.6" y="227" fill="#5E676D">0.903</text>
-<rect x="250" y="254" width="12" height="12" rx="3" fill="#ADB5BA"/><text x="268" y="264" fill="#1B1F22">baseline 0.1 (SQLite cache)</text><rect x="360" y="254" width="12" height="12" rx="3" fill="#1A6E70"/><text x="378" y="264" fill="#1B1F22">kv0 0.2</text>
+<rect x="250" y="254" width="12" height="12" rx="3" fill="#ADB5BA"/><text x="268" y="264" fill="#1B1F22">prototype (SQLite cache)</text><rect x="360" y="254" width="12" height="12" rx="3" fill="#1A6E70"/><text x="378" y="264" fill="#1B1F22">kv0</text>
 </svg>

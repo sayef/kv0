@@ -49,6 +49,11 @@
   flex-wrap: wrap;
   gap: 0.6rem;
 }
+.kv-note {
+  margin: 1rem 0 0;
+  color: var(--kv-meta);
+  font-size: 0.8rem;
+}
 .kv-btn {
   display: inline-flex;
   align-items: center;
