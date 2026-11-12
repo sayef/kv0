@@ -84,6 +84,32 @@ but they pass the same whitespace hooks: regenerate them rather than editing the
 the pre-commit hook disagree, the ruff pin in `pyproject.toml` and the `rev` in `.pre-commit-config.yaml`
 have drifted apart; I keep them on the same version.
 
+## Releasing
+
+Releases are off until the repository variable `RELEASE_ENABLED` is `true`; nothing has been published
+yet. With it on, every push to `main` updates a release pull request (version and `CHANGELOG.md`).
+Merging that pull request publishes `kv0` to crates.io, tags `v<version>` and creates the GitHub
+release (release-plz), and `release.yml` builds the wheels and publishes them to PyPI.
+
+The only version is `version` in `[workspace.package]` of `Cargo.toml`; maturin turns it into the
+PEP 440 form for the wheels (`0.1.0-beta.1` is `0.1.0b1` on PyPI). The first versions are betas
+toward 0.1.0:
+
+- **The first beta.** Nothing is published, so the first release pull request releases the current
+  version, `0.1.0-beta.1`, as it is.
+- **The next beta.** From a pre-release, release-plz bumps the last number (`0.1.0-beta.1` to
+  `0.1.0-beta.2`); merging the release pull request cuts it. A version with a pre-release part
+  becomes a GitHub pre-release (`git_release_type = "auto"` in `release-plz.toml`), and pip installs
+  it only when asked for (`pip install --pre kv0`, or `kv0==0.1.0b2`).
+- **0.1.0.** release-plz never leaves a pre-release on its own, so I set the version explicitly: a
+  pull request that sets `version = "0.1.0"` (or runs `release-plz set-version kv0@0.1.0`) and runs
+  `cargo update -w`. Once it is merged, release-plz sees a version higher than the published one,
+  keeps it, and opens the release pull request for 0.1.0. The same works for `0.1.0-rc.1` or any
+  other version.
+
+The notes under `## [Unreleased]` become the release's entry: release-plz only adds the version
+heading.
+
 ## Checklist for a pull request
 
 - `cargo fmt --all` and `cargo clippy --workspace --all-targets -- -D warnings` are clean.

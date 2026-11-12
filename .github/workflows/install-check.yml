@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Release tag to install, e.g. v0.2.0
+        description: Release tag to install, e.g. v0.1.0-beta.1
         required: true
 
 permissions:
@@ -41,7 +41,8 @@ jobs:
           TAG: ${{ inputs.tag }}
         shell: sh
         run: |
-          version="${TAG#v}"
+          # PyPI has the PEP 440 form of the Cargo version: 0.1.0-beta.1 is 0.1.0b1.
+          version=$(echo "${TAG#v}" | sed -e 's/-alpha\./a/' -e 's/-beta\./b/' -e 's/-rc\./rc/')
           # A fresh upload can take a few minutes to reach every PyPI mirror.
           for _ in 1 2 3 4 5 6 7 8 9 10; do
             pip install --only-binary=:all: --no-cache-dir "kv0==$version" && break
