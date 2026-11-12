@@ -6,6 +6,13 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `Run::track_many` (Python `Run.track_many`) writes a batch of points of one series with one lock
+  and one write-ahead-log append, with the same result as repeated `track` calls: steps are
+  numbered in order, the latest point of a step wins and non-finite values are stored as given. A
+  batch is buffered completely or not at all.
+
 ## [0.1.0-beta.1](https://github.com/sayef/kv0/releases/tag/v0.1.0-beta.1) - 2026-11-12
 
 The first release, published as betas (0.1.0-beta.N) before 0.1.0. Before it, kv0 was a pure-Python
