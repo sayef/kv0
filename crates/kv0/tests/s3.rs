@@ -2,6 +2,7 @@
 //! in Docker). Skipped otherwise.
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use kv0::kv::{Db, Options};
 use kv0::tracking::{NewRun, Repo, RepoOptions, StepRange, Track};
@@ -40,12 +41,40 @@ fn uuid_like() -> String {
     )
 }
 
+/// Runs `f` and fails the test when it takes longer than `limit`, so a stuck request or task
+/// fails fast instead of holding the whole job.
+fn within<F: FnOnce() + Send + 'static>(limit: Duration, f: F) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        f();
+        let _ = tx.send(());
+    });
+    match rx.recv_timeout(limit) {
+        Ok(()) => worker.join().unwrap(),
+        // The closure panicked: join to surface its message.
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            if let Err(e) = worker.join() {
+                std::panic::resume_unwind(e);
+            }
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            panic!("the test did not finish within {limit:?}")
+        }
+    }
+}
+
+const LIMIT: Duration = Duration::from_secs(180);
+
 #[test]
 fn kv_concurrent_writers_on_s3() {
     let Some((prefix, so)) = storage() else {
         eprintln!("skipped: KV0_TEST_S3_ENDPOINT is not set");
         return;
     };
+    within(LIMIT, move || kv_concurrent_writers(prefix, so));
+}
+
+fn kv_concurrent_writers(prefix: String, so: HashMap<String, String>) {
     let uri = format!("{prefix}/kv");
     let opts = Options {
         storage_options: so,
@@ -77,6 +106,12 @@ fn tracking_on_s3() {
         eprintln!("skipped: KV0_TEST_S3_ENDPOINT is not set");
         return;
     };
+    within(LIMIT, move || tracking(prefix, so));
+}
+
+/// Calls the blocking tracking APIs from a task on the kv0 runtime, as code inside
+/// `kv0::rt::block_on` may.
+fn tracking(prefix: String, so: HashMap<String, String>) {
     let uri = format!("{prefix}/repo");
     kv0::rt::block_on(async move {
         let repo = Repo::open(

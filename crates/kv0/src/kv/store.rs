@@ -148,18 +148,36 @@ pub(crate) async fn addresses(ds: &Dataset, ids: &HashSet<u64>) -> Result<Vec<(B
     Ok(out)
 }
 
-/// The values at row addresses `addrs` of `ds`, in the same order.
-/// Test hook: the next `take_values` returns one value too few.
+/// Test hook: dataset URIs whose next `take_values` returns one value too few. Keyed by URI so
+/// that tests running in parallel never consume each other's fault.
 #[cfg(test)]
-pub(crate) static SHORT_TAKE: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+static SHORT_TAKE: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
+/// Makes the next `take_values` on the dataset at `uri` return one value too few.
+#[cfg(test)]
+pub(crate) fn short_take_once(uri: &str) {
+    SHORT_TAKE.lock().unwrap().push(uri.to_owned());
+}
+
+#[cfg(test)]
+fn take_short_take(uri: &str) -> bool {
+    let mut armed = SHORT_TAKE.lock().unwrap();
+    match armed.iter().position(|u| u == uri) {
+        Some(i) => {
+            armed.swap_remove(i);
+            true
+        }
+        None => false,
+    }
+}
+
+/// The values at row addresses `addrs` of `ds`, in the same order.
 pub(crate) async fn take_values(ds: &Dataset, addrs: &[u64]) -> Result<Vec<Bytes>> {
     if addrs.is_empty() {
         return Ok(Vec::new());
     }
     #[cfg(test)]
-    if SHORT_TAKE.swap(false, std::sync::atomic::Ordering::AcqRel) {
+    if take_short_take(ds.uri()) {
         let mut v = Box::pin(take_values(ds, addrs)).await?;
         v.pop();
         return Ok(v);
