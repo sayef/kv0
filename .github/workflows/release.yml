@@ -44,7 +44,12 @@ jobs:
           INPUT_TAG: ${{ inputs.tag }}
         run: |
           case "$EVENT" in
-            workflow_run) tag=$(git tag --points-at HEAD --list 'v*' | sort -V | tail -n 1) ;;
+            # release-plz tags the release PR's own commit; when that PR is merged with a merge
+            # commit, the tag sits on the merge's second parent rather than on HEAD.
+            workflow_run)
+              tag=$( { git tag --points-at HEAD --list 'v*'
+                       if git rev-parse -q --verify 'HEAD^2' >/dev/null; then git tag --points-at 'HEAD^2' --list 'v*'; fi
+                     } | sort -V | tail -n 1) ;;
             workflow_dispatch) tag=$([[ "$INPUT_TAG" == v* ]] && echo "$INPUT_TAG" || true) ;;
             pull_request) tag="" ;;
             *) tag=$([[ "$GITHUB_REF" == refs/tags/v* ]] && echo "$GITHUB_REF_NAME" || true) ;;
@@ -78,7 +83,7 @@ jobs:
           target: ${{ matrix.target }}
           manylinux: ${{ matrix.manylinux || 'auto' }}
           before-script-linux: .github/scripts/install-protoc.sh
-          args: --release --out dist
+          args: --release --strip --out dist
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: wheels-${{ matrix.os }}-${{ matrix.target }}-${{ matrix.manylinux || 'native' }}
