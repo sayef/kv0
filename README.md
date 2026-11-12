@@ -18,6 +18,8 @@
   <a href="CHANGELOG.md">Changelog</a>
 </p>
 
+> kv0 is in beta: the API may still change before 0.1.0.
+
 kv0 is a library, not a server. Open a database by path or URI and you have an ordered key-value
 store: keys sort byte-wise, `WriteBatch`es commit atomically, and iterators `seek` and
 `seek_for_prev`. Next to it, typed tables for runs, parameters and metric series hold an experiment
