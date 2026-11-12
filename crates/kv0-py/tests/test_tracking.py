@@ -40,6 +40,25 @@ def test_track_and_read(tmp_path):
     assert repo.metric(run.id, "loss") == loss
 
 
+def test_track_many(tmp_path):
+    repo = _repo(tmp_path / "repo")
+    with repo.create_run() as one, repo.create_run() as many:
+        values = [0.5, float("nan"), float("inf"), 0.25, 0.125]
+        steps = [None, None, 7, 1, None]
+        for v, s in zip(values, steps, strict=True):
+            one.track(v, name="loss", step=s, context={"subset": "train"})
+        many.track_many("loss", values, steps=steps, context={"subset": "train"})
+        many.track_many("loss", [])
+        with pytest.raises(ValueError, match="steps has 1 entries"):
+            many.track_many("loss", [1.0, 2.0], steps=[3])
+
+    a = repo.metric(one.id, "loss", context={"subset": "train"})
+    b = repo.metric(many.id, "loss", context={"subset": "train"})
+    assert a["steps"] == b["steps"] == [0, 1, 7, 8]
+    assert [repr(v) for v in a["values"]] == [repr(v) for v in b["values"]]
+    assert b["values"][1] == 0.25  # the later point at step 1 wins
+
+
 def test_failed_run_and_resume(tmp_path):
     repo = _repo(tmp_path / "repo")
     with pytest.raises(RuntimeError), repo.create_run(name="crash") as run:
