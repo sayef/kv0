@@ -1,7 +1,7 @@
 """Key-value benchmark: put, batch write, get, seek + scan and full scan.
 
 Runs against whichever ``kv0`` is importable, so the same script measures the Lance-backed
-release and the pure-Python 0.1 release (installed in another environment). Synthetic keys
+release and the pure-Python prototype (installed in another environment). Synthetic keys
 shaped like a tracker's (a run prefix, a metric path and a big-endian step).
 
     python bench/bench_kv.py --n 100000 --out bench/results/kv-new.json
@@ -20,15 +20,16 @@ import time
 
 try:
     import kv0
-except ImportError:  # the 0.1 baseline (pure Python), under the import name it was released with
+
+    PROTOTYPE = False
+except ImportError:  # the pure-Python prototype, under the import name it was built with
     import importlib
 
     name = os.environ.get("KV0_BASELINE_MODULE")
     if not name:
-        sys.exit(
-            "kv0 is not installed here; for the 0.1 baseline, set KV0_BASELINE_MODULE to its import name"
-        )
+        sys.exit("kv0 is not installed here; for the prototype, set KV0_BASELINE_MODULE to its import name")
     kv0 = importlib.import_module(name)
+    PROTOTYPE = True
 
 
 def keys(n):
@@ -60,7 +61,7 @@ def main():
     lookups = random.Random(1).sample(ks, min(n, 20_000))
     root = tempfile.mkdtemp(prefix="kv0-bench-")
     res = {
-        "engine": getattr(kv0, "__version__", "0.1 (pure Python + SQLite)"),
+        "engine": getattr(kv0, "__version__", "prototype (pure Python + SQLite)"),
         "n": n,
         "python": platform.python_version(),
         "machine": platform.machine(),
@@ -115,9 +116,9 @@ def main():
         db.close()
         db2.close()
 
-        # Write-ahead log modes (0.2 only): plain puts with each wal_sync setting, and with the
+        # Write-ahead log modes (kv0 only): plain puts with each wal_sync setting, and with the
         # WAL off. The default (batch) is the put_ops_s row above.
-        if not res["engine"].startswith("0.1"):
+        if not PROTOTYPE:
             for mode, m in (("none", n), ("batch", n), ("always", 2000), ("off", n)):
                 o = kv0.Options(
                     create_if_missing=True,
@@ -131,7 +132,7 @@ def main():
                 res[f"put_wal_{mode}_ops_s"] = m / t
                 dbw.close()
 
-        # Durable per write: 0.1 commits every put to SQLite anyway (and ignores sync); 0.2 makes
+        # Durable per write: the prototype commits every put to SQLite anyway (and ignores sync); kv0 makes
         # each sync=True write one Lance commit.
         db3 = kv0.DB(os.path.join(root, "sync"), opts)
         m = 500

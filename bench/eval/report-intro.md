@@ -1,5 +1,5 @@
-The question: is kv0 0.2 (Rust, Lance, local write-ahead log) significantly better than 0.1
-(pure Python, a local SQLite file per database, optional S3 sync of segment files)? Everything here is
+The question: is kv0 (Rust, Lance, local write-ahead log) significantly better than the pure-Python
+prototype it replaced (pure Python, a local SQLite file per database, optional S3 sync of segment files)? Everything here is
 reproducible with `python bench/eval/run_all.py` followed by `python bench/eval/report.py`; raw
 results are in `bench/eval/results.jsonl`.
 
@@ -7,20 +7,20 @@ results are in `bench/eval/results.jsonl`.
 
 **Machine.** Intel Core i5-13500 (6 P-cores + 8 E-cores, 20 threads), 62 GB RAM, two Samsung PM9A1
 NVMe drives in software RAID (md), Linux 6.12 (Debian), Python 3.13. One machine for everything.
-kv0 0.2 is the release build (thin LTO) of this repository; 0.1 is the last pure-Python version,
+kv0 is the release build (thin LTO) of this repository; the prototype is the last pure-Python version,
 installed in its own virtual environment.
 
 **S3.** RustFS (an S3-compatible server) in Docker on the same machine, behind a small counting
 proxy (`bench/eval/s3proxy.py`) so request counts are exact for both versions. Latency is loopback,
-so S3 timings are a lower bound; request counts carry over to real S3 directly. 0.1 talks to S3
+so S3 timings are a lower bound; request counts carry over to real S3 directly. The prototype talks to S3
 through its own sync layer (`KV0_S3_*`, background flush every 5 s, `flush()`/`close()` push);
-0.2 opens `s3://…` through Lance.
+kv0 opens `s3://…` through Lance.
 
-**Durability.** 0.1's SQLite runs in WAL mode with `synchronous=NORMAL`: every write
+**Durability.** The prototype's SQLite runs in WAL mode with `synchronous=NORMAL`: every write
 is in the SQLite log before it returns (it survives a killed process) but is not fsynced, so a power
-loss can lose recent writes. 0.2's default `wal_sync="batch"` is the same guarantee class (written to
-the OS before returning, fsync about every 100 ms), so **0.1 against 0.2 default is the like-for-like
-comparison**. `wal_sync="always"` fsyncs every write, which is *stronger* than 0.1; it is included as
+loss can lose recent writes. kv0's default `wal_sync="batch"` is the same guarantee class (written to
+the OS before returning, fsync about every 100 ms), so **the prototype against kv0's default is the
+like-for-like comparison**. `wal_sync="always"` fsyncs every write, which is *stronger* than the prototype; it is included as
 asked, on the smaller workloads (an fsync costs about 6 ms on this disk).
 
 **Repetitions and statistics.** Every cell runs 5 times, each in a fresh process (write cells on a
@@ -49,7 +49,7 @@ the same process.
 - **Range scans (d).** 200 × (`seek` to a random prefix + 100 `next()`), and one full scan.
 - **Reopen / cold start (e).** Open an existing database in a new process (dataset evicted from the page cache) and
   read one key, at 10 000, 1 000 000 and 10 000 000 keys (S3: 10 000 and 1 000 000, from a new empty
-  local directory, which is a new machine for 0.1). Plus **large values**: 100 000 × 16 KiB.
+  local directory, which is a new machine for the prototype). Plus **large values**: 100 000 × 16 KiB.
 - **Two writers (f).** Two processes write 200 000 keys each (batches of 100) to one database at the
   same time; a third process then counts what is visible.
 - **Crash recovery (g).** A process writes 200 000 single puts, never flushes and SIGKILLs itself; the

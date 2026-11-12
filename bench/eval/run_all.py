@@ -1,8 +1,8 @@
-"""Runs the 0.1-vs-0.2 evaluation: every cell, REPS times, each in a fresh process.
+"""Runs the evaluation of kv0 against the pure-Python prototype: every cell, REPS times, each in a fresh process.
 
     python bench/eval/run_all.py [--reps 5] [--only tracker,bulk] [--out bench/eval/results.jsonl]
 
-Needs: bench/.venv-old with the 0.1 baseline (bench/run.sh makes it; set KV0_BASELINE_MODULE), .venv with this release built
+Needs: bench/.venv-old with the prototype (bench/run.sh makes it; set KV0_BASELINE_MODULE), .venv with this release built
 in release mode, Docker (RustFS for the S3 cells), the aws CLI, and sudo for dropping the page
 cache before cold cells (skipped, and recorded as warm, without it). Results are appended as
 JSON lines; cells already in the output file are skipped, so a run can be resumed.
@@ -25,7 +25,7 @@ CELL = Path(__file__).with_name("cell.py")
 PY = {
     "v01": ROOT / "bench/.venv-old/bin/python",
     "v02": Path(os.environ.get("KV0_EVAL_V02_PY", ROOT / ".venv/bin/python")),
-    # A baseline build of 0.2 to compare this one against (`--plan compare`).
+    # A baseline build of kv0 to compare this one against (`--plan compare`).
     "v02b": Path(os.environ.get("KV0_EVAL_BASE_PY", ROOT / ".venv-base/bin/python")),
 }
 BUCKET = "kv0-bench"
@@ -204,7 +204,7 @@ def plan():
 
 
 def plan_compare():
-    """This build (v02) against a baseline build of 0.2 (v02b), local cells, both in this run."""
+    """This build (v02) against a baseline build of kv0 (v02b), local cells, both in this run."""
     cells = []
     for e in ("v02b", "v02"):
         cells += [
@@ -311,7 +311,7 @@ def run_one(kind, engine, p, rep):
         if engine.startswith("v02"):  # create the dataset first, so both writers append
             run_cell(engine, "bulk", d, cid + "/", n=1)
         t0 = time.perf_counter()
-        # 0.1 on S3 is one local cache per machine: two writers are two machines on one prefix.
+        # The prototype on S3 is one local cache per machine: two writers are two machines on one prefix.
         dirs = [d / f"w{i}" if engine == "v01-s3" else d for i in range(2)]
         procs = [
             run_cell(engine, "write-part", dirs[i], cid + "/", background=True, part=i, n=p["n"])

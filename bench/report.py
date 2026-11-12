@@ -5,8 +5,8 @@ import pathlib
 
 root = pathlib.Path(__file__).resolve().parent.parent
 res = root / "bench" / "results"
-new = json.loads((res / "kv-kv0-0.2.json").read_text())
-old = json.loads((res / "kv-baseline-0.1.json").read_text())
+new = json.loads((res / "kv-kv0.json").read_text())
+old = json.loads((res / "kv-prototype.json").read_text())
 trk = json.loads((res / "tracking.json").read_text())
 
 rows = [
@@ -30,7 +30,7 @@ def fmt(v, unit):
     return f"{v:,.0f} {unit}"
 
 
-kv = ["| Operation | baseline 0.1 | kv0 0.2 | Change |", "|---|---:|---:|---:|"]
+kv = ["| Operation | prototype | kv0 | Change |", "|---|---:|---:|---:|"]
 for label, key, unit, higher in rows:
     a, b = old[key], new[key]
     if unit == "MB":
@@ -39,7 +39,7 @@ for label, key, unit, higher in rows:
         ratio = (b / a) if higher else (a / b)
         change = f"{ratio:.1f}× faster" if ratio >= 1 else f"{1 / ratio:.0f}× slower"
     kv.append(f"| {label} | {fmt(a, unit)} | {fmt(b, unit)} | {change} |")
-wal = ["| put (one key per call), 0.2 | ops/s |", "|---|---:|"]
+wal = ["| put (one key per call), kv0 | ops/s |", "|---|---:|"]
 for mode, label in (
     ("off", "WAL off"),
     ("none", 'wal_sync="none" (no fsync)'),

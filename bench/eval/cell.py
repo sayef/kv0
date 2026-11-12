@@ -4,8 +4,8 @@
 
 The spec names the engine (`v01`, `v01-s3`, `v02`, `v02-always`, `v02-s3`), the workload and its
 parameters, and the directories to use. The result is one JSON object on stdout. The same file
-runs under the 0.1 baseline (pure Python on a SQLite cache) and 0.2 (Rust), so it uses only the API
-both share. Set `KV0_BASELINE_MODULE` to the baseline's import name for the 0.1 engines.
+runs under the pure-Python prototype (on a SQLite cache) and kv0 (Rust), so it uses only the API
+both share. Set `KV0_BASELINE_MODULE` to the baseline's import name for the prototype engines (`v01`, `v01-s3`).
 
 Workloads, all on synthetic data:
 
@@ -36,14 +36,12 @@ V02 = ENGINE.startswith("v02")
 
 try:
     import kv0
-except ImportError:  # the 0.1 baseline (pure Python), under the import name it was released with
+except ImportError:  # the pure-Python prototype, under the import name it was built with
     import importlib
 
     name = os.environ.get("KV0_BASELINE_MODULE")
     if not name:
-        sys.exit(
-            "kv0 is not installed here; for the 0.1 baseline, set KV0_BASELINE_MODULE to its import name"
-        )
+        sys.exit("kv0 is not installed here; for the prototype, set KV0_BASELINE_MODULE to its import name")
     kv0 = importlib.import_module(name)
 
 SEP = b"\xfe"
@@ -285,7 +283,7 @@ def write_part():
             try:
                 db.write(b)
                 break
-            except Exception:  # noqa: BLE001 - 0.1 on one SQLite file raises "database is locked"
+            except Exception:  # noqa: BLE001 - the prototype on one SQLite file raises "database is locked"
                 errors += 1
                 time.sleep(0.05)
     db.close()
