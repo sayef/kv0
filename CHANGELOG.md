@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+The first release, published as betas (0.1.0-beta.N) before 0.1.0. Before it, kv0 was a pure-Python
+prototype (an ordered key-value store on a local SQLite cache with optional S3 sync) that was never
+published; the entries below describe the changes from that prototype.
+
 ### Changed
 
 - kv0 is now a Rust library with Python bindings, and stores data in Lance datasets. A
@@ -71,7 +75,3 @@ All notable changes to this project are documented here. The format follows
 
 - The SQLite cache and the S3 segment and manifest sync, with the `KV0_S3_*` environment
   variables and the `boto3` dependency.
-
-## [0.1.0] - 2026-06-19
-
-- Pure-Python ordered key-value store: a local SQLite cache with optional S3 sync.
