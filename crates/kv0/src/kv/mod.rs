@@ -1503,7 +1503,8 @@ mod tests {
         .unwrap();
         db.put(b"a", &[1u8; 100]).unwrap();
         db.flush().unwrap();
-        store::SHORT_TAKE.store(true, Ordering::Release);
+        let uri = db.inner.state.read().reader.uri().to_owned();
+        store::short_take_once(&uri);
         let e = db.get(b"a").unwrap_err();
         assert!(matches!(e, Error::Corruption(_)), "{e:?}");
         assert!(db.inner.flights.lock().is_empty());
