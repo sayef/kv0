@@ -483,3 +483,94 @@ fn close_waits_for_running_maintenance() {
     block_on(async move { r.close().await }).unwrap();
     assert!(repo.background_compactions() >= 1);
 }
+
+#[test]
+fn track_many_is_replayed_after_a_crash() {
+    use kv0::tracking::TrackPoint;
+    let (_d, uri, wal) = setup();
+    let repo = open(&uri, &wal);
+    let run = repo
+        .create_run(NewRun {
+            run_id: Some("r1".into()),
+            ..NewRun::default()
+        })
+        .unwrap();
+    let batch: Vec<TrackPoint> = (0..1000)
+        .map(|i| TrackPoint {
+            value: i as f64,
+            ..TrackPoint::default()
+        })
+        .collect();
+    run.track_many("m", None, &batch).unwrap();
+    // The second batch continues the numbering and rewrites step 3.
+    run.track_many(
+        "m",
+        None,
+        &[
+            TrackPoint {
+                value: -1.0,
+                ..TrackPoint::default()
+            },
+            TrackPoint {
+                value: 3.5,
+                step: Some(3),
+                ..TrackPoint::default()
+            },
+        ],
+    )
+    .unwrap();
+    drop(run);
+    repo.abandon();
+
+    let repo = open(&uri, &wal);
+    let got = points(&repo, "r1", "m");
+    assert_eq!(got.len(), 1001);
+    assert_eq!(got[3], (3, 3.5));
+    assert_eq!(got[1000], (1000, -1.0));
+}
+
+#[test]
+fn a_failed_track_many_buffers_nothing() {
+    use kv0::tracking::TrackPoint;
+    let (_d, uri, wal) = setup();
+    let repo = open(&uri, &wal);
+    let run = repo
+        .create_run(NewRun {
+            run_id: Some("r1".into()),
+            ..NewRun::default()
+        })
+        .unwrap();
+    run.track("m", 0.0, Track::default()).unwrap();
+    // The third point has no step after i64::MAX: the whole batch is refused.
+    let err = run
+        .track_many(
+            "m",
+            None,
+            &[
+                TrackPoint {
+                    value: 1.0,
+                    ..TrackPoint::default()
+                },
+                TrackPoint {
+                    value: 2.0,
+                    step: Some(i64::MAX),
+                    ..TrackPoint::default()
+                },
+                TrackPoint {
+                    value: 3.0,
+                    ..TrackPoint::default()
+                },
+            ],
+        )
+        .unwrap_err();
+    assert!(matches!(err, kv0::Error::InvalidArgument(_)), "{err:?}");
+    let err = run
+        .track_many("m", Some(json!([1])), &[TrackPoint::default()])
+        .unwrap_err();
+    assert!(matches!(err, kv0::Error::InvalidArgument(_)), "{err:?}");
+    // Numbering continues from the last point that was stored.
+    run.track("m", 4.0, Track::default()).unwrap();
+    let r = repo.clone();
+    block_on(async move { r.flush().await }).unwrap();
+    assert_eq!(points(&repo, "r1", "m"), vec![(0, 0.0), (1, 4.0)]);
+}

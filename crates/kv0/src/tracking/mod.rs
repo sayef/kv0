@@ -324,6 +324,18 @@ pub struct Track {
     pub timestamp: Option<i64>,
 }
 
+/// One point of a [`Run::track_many`] batch.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct TrackPoint {
+    pub value: f64,
+    /// The step; one past the series' last step (including earlier points of the same batch)
+    /// when `None`.
+    pub step: Option<i64>,
+    pub epoch: Option<i64>,
+    /// Microseconds since the Unix epoch; the time of the call when `None`.
+    pub timestamp: Option<i64>,
+}
+
 /// A step range for metric reads: `start <= step < stop`; open ends when `None`.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct StepRange {
@@ -3423,6 +3435,116 @@ impl Run {
         };
         if full {
             self.repo.inner.core.flush_blocking()?;
+        }
+        Ok(())
+    }
+
+    /// Buffers many points of one series (`name` under `context`, `None` being the empty
+    /// context) at once: the same as calling [`Run::track`] for each point in order, but with
+    /// one lock and one write-ahead-log append for the whole batch. When a step appears twice
+    /// (in the batch or before it), the later point wins. Either every point is buffered or,
+    /// on an error, none is.
+    pub fn track_many(
+        &self,
+        name: &str,
+        context: Option<Value>,
+        points: &[TrackPoint],
+    ) -> Result<()> {
+        let core = &self.repo.inner.core;
+        core.check_open()?;
+        let run_id = self.id();
+        core.check_run(&run_id)?;
+        let context = context.unwrap_or(Value::Object(Default::default()));
+        if !context.is_object() {
+            return Err(Error::InvalidArgument(
+                "a context must be a JSON object".into(),
+            ));
+        }
+        if points.is_empty() {
+            return Ok(());
+        }
+        let sid = series_id(&run_id, name, &context);
+        // Number the steps from the series' last step, held until the batch is buffered so that
+        // concurrent writes to the series number after it; an error leaves the handle as it was.
+        let mut last_steps = self.steps.lock();
+        let (steps, relog, last) = {
+            let mut last = last_steps.get(&sid).copied();
+            let mut relog = false;
+            let mut steps = Vec::with_capacity(points.len());
+            for p in points {
+                let step = match (p.step, last) {
+                    (Some(s), _) => s,
+                    (None, None) => 0,
+                    (None, Some(l)) => l.checked_add(1).ok_or_else(|| {
+                        Error::InvalidArgument(format!(
+                            "series {name:?} is at the largest step; pass `step` explicitly"
+                        ))
+                    })?,
+                };
+                relog |= last.is_some_and(|l| step <= l);
+                last = Some(last.map_or(step, |l| l.max(step)));
+                steps.push(step);
+            }
+            (steps, relog, last)
+        };
+        let new_series = core
+            .known_series
+            .lock()
+            .insert(sid, run_id.clone())
+            .is_none();
+        let full = {
+            let mut b = core.buffers.lock();
+            let now = now_micros();
+            let series = new_series.then(|| SeriesInfo {
+                series_id: sid,
+                run_id,
+                name: name.to_string(),
+                context,
+                created_at: now,
+            });
+            let mut records = Vec::with_capacity(points.len() + 1);
+            if let Some(s) = &series {
+                let seq = b.clock.next();
+                records.push(series_record(seq, s));
+            }
+            for (p, &step) in points.iter().zip(&steps) {
+                let seq = b.clock.next();
+                let ts = p.timestamp.unwrap_or(now);
+                records.push(point_record(seq, sid, step, p.epoch, ts, p.value));
+            }
+            if let Err(e) = core.log(&records) {
+                if new_series {
+                    core.known_series.lock().remove(&sid);
+                }
+                return Err(e);
+            }
+            if let Some(s) = series {
+                b.series.push(s);
+            }
+            if relog {
+                b.relogged.insert(sid);
+            }
+            let n = points.len();
+            b.series_ids.reserve(n);
+            b.steps.reserve(n);
+            b.epochs.reserve(n);
+            b.timestamps.reserve(n);
+            b.values.reserve(n);
+            for (p, step) in points.iter().zip(steps) {
+                b.series_ids.push(sid);
+                b.steps.push(step);
+                b.epochs.push(p.epoch);
+                b.timestamps.push(p.timestamp.unwrap_or(now));
+                b.values.push(p.value);
+            }
+            b.series_ids.len() >= core.opts.flush_rows
+        };
+        if let Some(last) = last {
+            last_steps.insert(sid, last);
+        }
+        drop(last_steps);
+        if full {
+            core.flush_blocking()?;
         }
         Ok(())
     }

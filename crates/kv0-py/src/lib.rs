@@ -7,7 +7,9 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use kv0_rs::kv::{Db, DbIterator, Options, WalSync, WriteBatch, WriteOptions};
-use kv0_rs::tracking::{self, NewRun, Repo, RepoOptions, Run, RunStatus, StepRange, Track};
+use kv0_rs::tracking::{
+    self, NewRun, Repo, RepoOptions, Run, RunStatus, StepRange, Track, TrackPoint,
+};
 use kv0_rs::{rt, Error};
 use pyo3::create_exception;
 use pyo3::exceptions::{PyException, PyFileNotFoundError, PyOSError, PyValueError};
@@ -1238,6 +1240,53 @@ impl PyRun {
             timestamp,
         };
         py.detach(|| self.run.track(name, value, t)).map_err(err)
+    }
+
+    /// Buffers many points of one series at once, as repeated `track` calls would, with one
+    /// write-ahead-log append. `steps`, `epochs` and `timestamps` are lists as long as `values`
+    /// (entries may be `None`), or `None` for all.
+    #[pyo3(signature = (name, values, steps=None, epochs=None, context=None, timestamps=None))]
+    #[allow(clippy::too_many_arguments)] // mirrors the Python signature
+    fn track_many(
+        &self,
+        py: Python<'_>,
+        name: &str,
+        values: Vec<f64>,
+        steps: Option<Vec<Option<i64>>>,
+        epochs: Option<Vec<Option<i64>>>,
+        context: Option<&Bound<'_, PyAny>>,
+        timestamps: Option<Vec<Option<i64>>>,
+    ) -> PyRes<()> {
+        let n = values.len();
+        for (what, col) in [
+            ("steps", &steps),
+            ("epochs", &epochs),
+            ("timestamps", &timestamps),
+        ] {
+            if let Some(c) = col {
+                if c.len() != n {
+                    return Err(PyValueError::new_err(format!(
+                        "{what} has {} entries and values {n}",
+                        c.len()
+                    )));
+                }
+            }
+        }
+        let context = match context {
+            Some(c) if !c.is_none() => Some(to_json(py, c)?),
+            _ => None,
+        };
+        let at = |c: &Option<Vec<Option<i64>>>, i: usize| c.as_ref().and_then(|c| c[i]);
+        let points: Vec<TrackPoint> = (0..n)
+            .map(|i| TrackPoint {
+                value: values[i],
+                step: at(&steps, i),
+                epoch: at(&epochs, i),
+                timestamp: at(&timestamps, i),
+            })
+            .collect();
+        py.detach(|| self.run.track_many(name, context, &points))
+            .map_err(err)
     }
 
     /// Merges a dict of parameters, by dotted key, into the run's parameters.

@@ -1,3 +1,4 @@
+from collections.abc import Sequence
 from typing import Any, Self
 
 __version__: str
@@ -101,6 +102,15 @@ class Run:
         epoch: int | None = ...,
         context: dict[str, Any] | None = ...,
         timestamp: int | None = ...,
+    ) -> None: ...
+    def track_many(
+        self,
+        name: str,
+        values: Sequence[float],
+        steps: Sequence[int | None] | None = ...,
+        epochs: Sequence[int | None] | None = ...,
+        context: dict[str, Any] | None = ...,
+        timestamps: Sequence[int | None] | None = ...,
     ) -> None: ...
     def set_params(self, params: dict[str, Any]) -> None: ...
     def __setitem__(self, key: str, value: Any) -> None: ...

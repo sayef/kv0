@@ -45,6 +45,18 @@ A series is a metric name under a context in a run. Without `step`, a point gets
 step; `repo.resume_run(run_id)` continues numbering after the stored steps. When a step is tracked twice,
 the later point wins.
 
+`track_many` writes many points of one series at once, with the same result as calling `track` for each
+in order but with one lock and one write-ahead-log append for the batch, which suits a server that
+receives points in batches. `steps`, `epochs` and `timestamps` are lists as long as `values` (with `None`
+entries for defaults), or omitted; a batch is buffered completely or, on an error, not at all:
+
+```python
+run.track_many('loss', [0.9, 0.7, 0.5])                         # the next three steps
+run.track_many('accuracy', [0.8, 0.85], steps=[10, 20], context={'subset': 'val'})
+```
+
+In Rust it is `Run::track_many(name, context, &[TrackPoint])`.
+
 ## Buffering and reading
 
 `track` and parameter writes are buffered in the `Repo` handle and committed in batches: at `flush_rows`

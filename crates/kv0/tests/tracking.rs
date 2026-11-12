@@ -175,3 +175,104 @@ fn blocking_use_and_many_writers() {
         assert_eq!(d.len(), 500);
     }
 }
+
+/// `track_many` stores exactly what the same `track` calls store, non-finite values included.
+#[tokio::test(flavor = "current_thread")]
+async fn track_many_matches_repeated_track() {
+    use kv0::tracking::TrackPoint;
+    let dir = tempfile::tempdir().unwrap();
+    let uri = dir.path().join("repo").to_string_lossy().into_owned();
+    let repo = Repo::open(&uri, opts()).await.unwrap();
+    let one = repo.create_run(NewRun::default()).unwrap();
+    let many = repo.create_run(NewRun::default()).unwrap();
+    let context = json!({"subset": "val"});
+    let mut batch: Vec<TrackPoint> = (0..50)
+        .map(|i| TrackPoint {
+            value: i as f64 * 0.5,
+            step: None,
+            epoch: Some(i / 10),
+            timestamp: Some(1_700_000_000_000_000 + i),
+        })
+        .collect();
+    batch[7].value = f64::NAN;
+    batch[8].value = f64::INFINITY;
+    batch[9].value = f64::NEG_INFINITY;
+    // Explicit steps: a rewrite of step 2 inside the batch, then a jump ahead and back.
+    batch[20].step = Some(2);
+    batch[30].step = Some(100);
+    batch[31].step = Some(40);
+    for p in &batch {
+        one.track(
+            "acc",
+            p.value,
+            Track {
+                step: p.step,
+                epoch: p.epoch,
+                context: Some(context.clone()),
+                timestamp: p.timestamp,
+            },
+        )
+        .unwrap();
+    }
+    many.track_many("acc", Some(context.clone()), &batch[..25])
+        .unwrap();
+    many.track_many("acc", Some(context.clone()), &batch[25..])
+        .unwrap();
+    many.track_many("acc", Some(context.clone()), &[]).unwrap();
+    // A later plain track continues the numbering of the batch.
+    one.track(
+        "acc",
+        9.0,
+        Track {
+            context: Some(context.clone()),
+            timestamp: Some(1_800_000_000_000_000),
+            ..Track::default()
+        },
+    )
+    .unwrap();
+    many.track(
+        "acc",
+        9.0,
+        Track {
+            context: Some(context.clone()),
+            timestamp: Some(1_800_000_000_000_000),
+            ..Track::default()
+        },
+    )
+    .unwrap();
+    repo.flush().await.unwrap();
+
+    let a = repo
+        .read_metric(&one.id(), "acc", &context, StepRange::default())
+        .await
+        .unwrap();
+    let b = repo
+        .read_metric(&many.id(), "acc", &context, StepRange::default())
+        .await
+        .unwrap();
+    assert_eq!(a.steps, b.steps);
+    assert_eq!(a.epochs, b.epochs);
+    assert_eq!(a.timestamps, b.timestamps);
+    let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+    assert_eq!(bits(&a.values), bits(&b.values));
+    assert_eq!(
+        a.steps.last(),
+        Some(&119),
+        "numbering continues after the largest step"
+    );
+    let i = a.steps.iter().position(|&s| s == 2).unwrap();
+    assert_eq!(a.values[i], 10.0, "the later point at step 2 wins");
+    assert!(a.values.iter().any(|v| v.is_nan()));
+
+    let sa = repo.series(&one.id()).await.unwrap();
+    let sb = repo.series(&many.id()).await.unwrap();
+    assert_eq!(sa.len(), 1);
+    assert_eq!(sb.len(), 1);
+    let ids = [sa[0].series_id, sb[0].series_id];
+    let stats = repo.series_stats(&ids).await.unwrap();
+    // Debug output, so that NaN statistics compare equal.
+    assert_eq!(
+        format!("{:?}", stats[&ids[0]]),
+        format!("{:?}", stats[&ids[1]])
+    );
+}
