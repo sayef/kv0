@@ -30,7 +30,7 @@ lance-index = { version = "=14.0.2", default-features = false }
 arrow-array = "58"
 arrow-schema = "58"
 # Filtering record batches (records folding).
-arrow-select = "58"
+arrow-select = "60"
 bytes = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 futures = { version = "0.3", default-features = false, features = ["std"] }
