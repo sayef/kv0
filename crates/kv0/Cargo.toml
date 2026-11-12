@@ -28,7 +28,7 @@ azure = ["lance/azure"]
 lance = { version = "14.0.2", default-features = false }
 lance-index = { version = "=14.0.2", default-features = false }
 arrow-array = "58"
-arrow-schema = "58"
+arrow-schema = "60"
 # Filtering record batches (records folding).
 arrow-select = "58"
 bytes = "1"
