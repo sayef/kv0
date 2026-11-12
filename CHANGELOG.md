@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.0-beta.1](https://github.com/sayef/kv0/releases/tag/v0.1.0-beta.1) - 2026-11-12
+
 The first release, published as betas (0.1.0-beta.N) before 0.1.0. Before it, kv0 was a pure-Python
 prototype (an ordered key-value store on a local SQLite cache with optional S3 sync) that was never
 published; the entries below describe the changes from that prototype.
