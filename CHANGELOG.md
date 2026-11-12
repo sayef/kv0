@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.0-beta.2](https://github.com/sayef/kv0/compare/v0.1.0-beta.1...v0.1.0-beta.2) - 2026-11-12
+
 ### Added
 
 - `Run::track_many` (Python `Run.track_many`) writes a batch of points of one series with one lock
