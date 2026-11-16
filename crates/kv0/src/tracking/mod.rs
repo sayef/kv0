@@ -2428,7 +2428,6 @@ impl Core {
 
     /// Physically removes the data of deleted runs (see [`Repo::purge`]).
     async fn purge(&self, force: bool) -> Result<crate::PurgeReport> {
-        use crate::purge;
         self.flush().await?;
         let mut t = self.tables.lock().await;
         let t = &mut *t;
@@ -2468,7 +2467,7 @@ impl Core {
                 tables.push((format!("records table {name:?}"), ds, true));
             }
             for (name, ds, by_run) in tables {
-                for (tag, v) in purge::old_tags(ds).await? {
+                for (tag, v) in storage::lance::old_tags(ds).await? {
                     let holds = match (&pred, by_run) {
                         (_, false) => true,
                         (None, true) => false,
@@ -2563,8 +2562,8 @@ impl Core {
             .into_iter()
             .chain(recs.iter_mut().map(|(_, d)| d))
         {
-            report.fragments_rewritten += purge::rewrite_deleted(ds).await?;
-            let (v, b) = purge::remove_old_versions(ds).await?;
+            report.fragments_rewritten += storage::lance::rewrite_deleted(ds).await?;
+            let (v, b) = storage::lance::remove_old_versions(ds).await?;
             report.versions_removed += v;
             report.bytes_removed += b;
         }
