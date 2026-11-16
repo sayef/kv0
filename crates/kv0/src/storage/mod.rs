@@ -5,7 +5,8 @@
 //! string options (for example `aws_endpoint`, `aws_region`, `allow_http`), and fall back to the
 //! usual environment variables (`AWS_*`, `GOOGLE_*`, `AZURE_*`).
 //!
-//! The key-value layer reaches storage only through [`oplog::OpLog`]; [`lance`] implements it.
+//! The key-value layer reaches storage only through [`oplog::OpLog`], the tracking layer only
+//! through [`table::Table`] with [`pred::Pred`] filters; [`lance`] implements both.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -14,11 +15,10 @@ use crate::error::{Error, Result};
 
 pub(crate) mod lance;
 pub(crate) mod oplog;
+pub(crate) mod pred;
+pub(crate) mod table;
 
-// Lance helpers the tracking layer still calls directly.
-pub(crate) use self::lance::{
-    list_dir, open, open_or_create, remove_dir, tag_version, write_params,
-};
+pub(crate) use self::lance::{list_dir, remove_dir};
 
 /// Object-store options passed through to Lance, such as `aws_endpoint` or `aws_region`.
 pub type StorageOptions = HashMap<String, String>;

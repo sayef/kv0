@@ -1,6 +1,7 @@
 //! The Lance storage engine: datasets, versions, tags and cleanup.
 
 pub(crate) mod kv;
+pub(crate) mod table;
 
 use std::sync::Arc;
 
@@ -142,26 +143,6 @@ pub(crate) async fn cleanup(
         .build();
     let s = lance::dataset::cleanup::cleanup_old_versions(ds, policy).await?;
     Ok((s.old_versions, s.bytes_removed))
-}
-
-/// Removes every version of `ds` but the latest and tagged ones. Returns (versions, bytes).
-pub(crate) async fn remove_old_versions(ds: &Dataset) -> Result<(u64, u64)> {
-    cleanup(ds, chrono::Utc::now() + chrono::Duration::seconds(1)).await
-}
-
-/// Tags of `ds` on versions older than its current one, as (name, version).
-pub(crate) async fn old_tags(ds: &Dataset) -> Result<Vec<(String, u64)>> {
-    let current = ds.version().version;
-    let mut out: Vec<(String, u64)> = ds
-        .tags()
-        .list()
-        .await?
-        .into_iter()
-        .map(|(n, c)| (n, c.version))
-        .filter(|(_, v)| *v < current)
-        .collect();
-    out.sort();
-    Ok(out)
 }
 
 /// Names of the entries directly under `uri` (empty when it does not exist).
