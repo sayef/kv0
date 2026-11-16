@@ -1,8 +1,10 @@
-//! Arrow schemas of the tracking tables.
+//! Arrow schemas of the tracking tables, as the Lance engine stores them.
 
 use std::sync::{Arc, LazyLock};
 
 use arrow_schema::{DataType, Field, Schema, SchemaRef, TimeUnit};
+
+use crate::storage::types::logical_schema;
 
 fn ts() -> DataType {
     DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into()))
@@ -91,3 +93,11 @@ pub static METRICS_ADDED: LazyLock<SchemaRef> = LazyLock::new(|| {
         true,
     )]))
 });
+
+/// The logical schemas the tracking layer reads and writes: the tables above with signed
+/// integers (`seq`, `series_id`: `Int64`; `fields`: `Int32`). A storage engine stores them as
+/// it does (see `storage::types`).
+pub(crate) static RUNS_LOGICAL: LazyLock<SchemaRef> = LazyLock::new(|| logical_schema(&RUNS));
+pub(crate) static PARAMS_LOGICAL: LazyLock<SchemaRef> = LazyLock::new(|| logical_schema(&PARAMS));
+pub(crate) static SERIES_LOGICAL: LazyLock<SchemaRef> = LazyLock::new(|| logical_schema(&SERIES));
+pub(crate) static METRICS_LOGICAL: LazyLock<SchemaRef> = LazyLock::new(|| logical_schema(&METRICS));

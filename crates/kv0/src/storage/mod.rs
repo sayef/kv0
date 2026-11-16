@@ -17,6 +17,7 @@ pub(crate) mod lance;
 pub(crate) mod oplog;
 pub(crate) mod pred;
 pub(crate) mod table;
+pub(crate) mod types;
 
 pub(crate) use self::lance::{list_dir, remove_dir};
 

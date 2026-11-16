@@ -13,7 +13,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
 
-use arrow_array::{Array, RecordBatch, StringArray, TimestampMicrosecondArray, UInt64Array};
+use arrow_array::{Array, Int64Array, RecordBatch, StringArray, TimestampMicrosecondArray};
 use arrow_schema::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use futures::{StreamExt, TryStreamExt};
 use serde_json::Value;
@@ -22,6 +22,7 @@ use crate::error::{Error, Result};
 use crate::storage::oplog::FileId;
 use crate::storage::pred::Pred;
 use crate::storage::table::{Scan, TableRef};
+use crate::storage::types::{logical_schema, seq_from_i64, seq_to_i64};
 use crate::storage::{self, StorageOptions};
 pub static RECORDS: LazyLock<SchemaRef> = LazyLock::new(|| {
     Arc::new(Schema::new(vec![
@@ -38,6 +39,9 @@ pub static RECORDS: LazyLock<SchemaRef> = LazyLock::new(|| {
         ),
     ]))
 });
+
+/// [`RECORDS`] with a signed `seq`, as the tracking layer reads and writes it.
+pub(crate) static RECORDS_LOGICAL: LazyLock<SchemaRef> = LazyLock::new(|| logical_schema(&RECORDS));
 
 /// A row to append.
 #[derive(Clone, Debug, PartialEq)]
@@ -239,7 +243,7 @@ pub(crate) async fn read_legacy(
                 run_id: (!run.is_null(i)).then(|| run.value(i).to_string()),
                 data: serde_json::from_str(data.value(i))
                     .map_err(|e| Error::Corruption(e.to_string()))?,
-                seq: seq.value(i),
+                seq: seq_from_i64(seq.value(i)),
                 created_at: at.value(i),
             });
         }
@@ -299,9 +303,11 @@ pub(crate) fn batch(
 ) -> Result<RecordBatch> {
     let n = rows.len();
     Ok(RecordBatch::try_new(
-        RECORDS.clone(),
+        RECORDS_LOGICAL.clone(),
         vec![
-            Arc::new(UInt64Array::from_iter_values(seqs.iter().copied())),
+            Arc::new(Int64Array::from_iter_values(
+                seqs.iter().map(|s| seq_to_i64(*s)),
+            )),
             Arc::new(StringArray::from_iter_values(std::iter::repeat_n(table, n))),
             Arc::new(
                 rows.iter()
@@ -329,7 +335,7 @@ fn arrays(b: &RecordBatch) -> Result<Cols<'_>> {
         b.column_by_name(n)
             .ok_or_else(|| Error::Corruption(format!("records column {n} is missing")))
     };
-    let seq = col("seq")?.as_any().downcast_ref::<UInt64Array>();
+    let seq = col("seq")?.as_any().downcast_ref::<Int64Array>();
     let tbl = col("table_name")?.as_any().downcast_ref::<StringArray>();
     let run = col("run_id")?.as_any().downcast_ref::<StringArray>();
     let item = col("item_id")?.as_any().downcast_ref::<StringArray>();
@@ -346,7 +352,7 @@ fn arrays(b: &RecordBatch) -> Result<Cols<'_>> {
 }
 
 type Cols<'a> = (
-    &'a UInt64Array,
+    &'a Int64Array,
     &'a StringArray,
     &'a StringArray,
     &'a StringArray,
@@ -396,7 +402,10 @@ pub(crate) async fn read(ds: &TableRef, q: &RecordQuery) -> Result<Vec<Record>> 
         let (seq, tbl, run, item, data, at) = arrays(b)?;
         for i in 0..b.num_rows() {
             let k = key(run, item, i);
-            if newest.get(&k).is_some_and(|r| r.seq >= seq.value(i)) {
+            if newest
+                .get(&k)
+                .is_some_and(|r| r.seq >= seq_from_i64(seq.value(i)))
+            {
                 continue;
             }
             newest.insert(
@@ -407,7 +416,7 @@ pub(crate) async fn read(ds: &TableRef, q: &RecordQuery) -> Result<Vec<Record>> 
                     run_id: (!run.is_null(i)).then(|| run.value(i).to_string()),
                     data: serde_json::from_str(data.value(i))
                         .map_err(|e| Error::Corruption(e.to_string()))?,
-                    seq: seq.value(i),
+                    seq: seq_from_i64(seq.value(i)),
                     created_at: at.value(i),
                 },
             );
@@ -422,7 +431,7 @@ pub(crate) async fn read(ds: &TableRef, q: &RecordQuery) -> Result<Vec<Record>> 
 /// meanwhile. Returns the rows dropped (0 without a commit when there are none).
 pub(crate) async fn fold(ds: &mut TableRef) -> Result<usize> {
     // The newest sequence number per key.
-    let mut newest: HashMap<(Option<String>, String), u64> = HashMap::new();
+    let mut newest: HashMap<(Option<String>, String), i64> = HashMap::new();
     let mut rows = 0usize;
     {
         let mut st = ds
@@ -431,7 +440,7 @@ pub(crate) async fn fold(ds: &mut TableRef) -> Result<usize> {
         while let Some(b) = st.try_next().await? {
             let seq = b
                 .column_by_name("seq")
-                .and_then(|c| c.as_any().downcast_ref::<UInt64Array>());
+                .and_then(|c| c.as_any().downcast_ref::<Int64Array>());
             let run = b
                 .column_by_name("run_id")
                 .and_then(|c| c.as_any().downcast_ref::<StringArray>());
@@ -443,7 +452,7 @@ pub(crate) async fn fold(ds: &mut TableRef) -> Result<usize> {
             };
             for i in 0..b.num_rows() {
                 rows += 1;
-                let e = newest.entry(key(run, item, i)).or_insert(0);
+                let e = newest.entry(key(run, item, i)).or_insert(i64::MIN);
                 *e = (*e).max(seq.value(i));
             }
         }
@@ -467,7 +476,8 @@ pub(crate) async fn fold(ds: &mut TableRef) -> Result<usize> {
             arrow_select::filter::filter_record_batch(&b, &keep).unwrap_or(b)
         })
         .boxed();
-    ds.replace(files, RECORDS.clone(), stream, None).await?;
+    ds.replace(files, RECORDS_LOGICAL.clone(), stream, None)
+        .await?;
     Ok(dropped)
 }
 
