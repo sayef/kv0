@@ -8,6 +8,8 @@ crates/kv0            the library
   src/storage/oplog.rs     OpLog: the key-value layer's storage interface
   src/storage/table.rs     Table: the tracking layer's storage interface (versioned tables)
   src/storage/pred.rs      Pred: typed row filters for Table scans and deletes
+  src/storage/types.rs     the signed logical column types and their unsigned Lance storage
+  src/storage/arrow_bridge.rs  record batches between Arrow 58 and 59 (C data interface)
   src/storage/lance/       the Lance engine: kv.rs the OpLog, table.rs the Table
   src/rt.rs                the Tokio runtime behind the blocking APIs
   src/background.rs        one thread that flushes every open handle on its interval

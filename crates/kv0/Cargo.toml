@@ -27,8 +27,11 @@ azure = ["lance/azure"]
 [dependencies]
 lance = { version = "14.0.2", default-features = false }
 lance-index = { version = "=14.0.2", default-features = false }
-arrow-array = "58"
+arrow-array = { version = "58", features = ["ffi"] }
 arrow-schema = "58"
+# Arrow 59, the version of the Delta Lake engine; batches cross over the C data interface
+# (storage/arrow_bridge.rs).
+arrow-array-59 = { package = "arrow-array", version = "59", features = ["ffi"] }
 # Filtering record batches (records folding).
 arrow-select = "58"
 bytes = "1"
