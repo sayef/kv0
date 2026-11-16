@@ -2,6 +2,8 @@
 # CONTRIBUTING.md lists the checks; CI runs the same hooks. Keep the ruff version in step with
 # the `ruff` pin in pyproject.toml (uv.lock), which CI uses.
 minimum_pre_commit_version: "3.0.0"
+# Test fixtures are storage files written by kv0, byte for byte.
+exclude: ^crates/kv0/tests/fixtures/
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0
