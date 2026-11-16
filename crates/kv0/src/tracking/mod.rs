@@ -35,12 +35,7 @@ use arrow_array::{
 };
 use arrow_schema::SchemaRef;
 use bytes::Bytes;
-use futures::{FutureExt, TryStreamExt};
-use lance::dataset::optimize::{compact_files, CompactionOptions};
-use lance::dataset::{Dataset, InsertBuilder, NewColumnTransform, WriteMode};
-use lance::index::DatasetIndexExt;
-use lance_index::scalar::{BuiltinIndexType, ScalarIndexParams};
-use lance_index::IndexType;
+use futures::{FutureExt, StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -51,6 +46,9 @@ use crate::kv::view::Op;
 use crate::kv::wal::{self, Wal};
 pub use crate::kv::WalSync;
 use crate::rt;
+use crate::storage::oplog::FileId;
+use crate::storage::pred::{Cmp, Lit, Pred};
+use crate::storage::table::{self as tbl, FileTag, Scan, TableRef};
 use crate::storage::{self, StorageOptions};
 
 pub use json::canonical as canonical_context;
@@ -386,10 +384,6 @@ fn now_micros() -> i64 {
     (now_nanos() / 1_000) as i64
 }
 
-fn quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "''"))
-}
-
 #[derive(Default)]
 struct Buffers {
     /// `(seq, record, fields it sets)`.
@@ -419,10 +413,10 @@ impl Buffers {
 }
 
 struct Tables {
-    runs: Dataset,
-    params: Dataset,
-    series: Dataset,
-    metrics: Dataset,
+    runs: TableRef,
+    params: TableRef,
+    series: TableRef,
+    metrics: TableRef,
 }
 
 /// State shared by a repository handle, its runs and the background flusher.
@@ -436,8 +430,8 @@ struct Core {
     known_series: parking_lot::Mutex<HashMap<u64, String>>,
     /// Runs this handle knows were deleted (tombstones read, or deleted here).
     deleted: parking_lot::Mutex<HashSet<String>>,
-    /// Fragments of `runs` already read for tombstones.
-    tombstones_read: parking_lot::Mutex<HashSet<u64>>,
+    /// Files of `runs` already read for tombstones.
+    tombstones_read: parking_lot::Mutex<HashSet<FileId>>,
     /// When a flush last checked for a newer version of `runs`.
     tombstones_checked: parking_lot::Mutex<Option<Instant>>,
     /// Held only by tasks on the kv0 runtime (see [`rt::spawn`]).
@@ -461,7 +455,7 @@ struct Core {
     /// This core, for spawning maintenance from `&self`.
     me: std::sync::OnceLock<Weak<Core>>,
     /// Records tables opened so far, by name.
-    records: tokio::sync::Mutex<HashMap<String, Dataset>>,
+    records: tokio::sync::Mutex<HashMap<String, TableRef>>,
 }
 
 /// Owns the [`Core`]; flushes it when the last handle is dropped.
@@ -488,8 +482,8 @@ async fn open_table(
     name: &str,
     schema: SchemaRef,
     opts: &RepoOptions,
-) -> Result<Dataset> {
-    storage::open_or_create(
+) -> Result<TableRef> {
+    storage::table::open(
         &storage::join(root, &format!("{name}.lance")),
         &opts.storage_options,
         schema,
@@ -501,68 +495,31 @@ async fn open_table(
 
 /// Adds the columns `runs` gained after its first release (as nulls, a metadata-only commit),
 /// so rows written now fit. Another writer upgrading at the same time is harmless.
-async fn upgrade(ds: &mut Dataset, added: &SchemaRef) -> Result<()> {
+async fn upgrade(t: &mut TableRef, added: &SchemaRef) -> Result<()> {
     let first = added.field(0).name().clone();
-    if ds.schema().field(&first).is_some() {
+    if t.has_column(&first) {
         return Ok(());
     }
-    let r = ds
-        .add_columns(NewColumnTransform::AllNulls(added.clone()), None, None)
-        .await;
-    if let Err(e) = r {
-        latest(ds).await?;
-        if ds.schema().field(&first).is_none() {
-            return Err(e.into());
+    if let Err(e) = t.add_columns(added.clone()).await {
+        t.latest().await?;
+        if !t.has_column(&first) {
+            return Err(e);
         }
     }
     Ok(())
 }
 
-async fn append(ds: &mut Dataset, batch: RecordBatch, opts: &StorageOptions) -> Result<()> {
-    append_all(ds, vec![batch], opts).await
+/// Every row matching `filter`, with the read-ahead kept small.
+async fn scan(t: &TableRef, filter: Option<Pred>) -> Result<Vec<RecordBatch>> {
+    t.scan(
+        Scan {
+            filter,
+            ..Scan::all()
+        }
+        .bounded(),
+    )
+    .await
 }
-
-/// Appends `batches` in one commit.
-async fn append_all(
-    ds: &mut Dataset,
-    batches: Vec<RecordBatch>,
-    opts: &StorageOptions,
-) -> Result<()> {
-    let params = storage::write_params(opts, WriteMode::Append);
-    let new = InsertBuilder::new(Arc::new(ds.clone()))
-        .with_params(&params)
-        .execute(batches)
-        .await?;
-    *ds = new;
-    Ok(())
-}
-
-async fn latest(ds: &mut Dataset) -> Result<()> {
-    if ds.latest_version_id().await? > ds.version().version {
-        ds.checkout_latest().await?;
-    }
-    Ok(())
-}
-
-async fn scan(ds: &Dataset, filter: Option<&str>) -> Result<Vec<RecordBatch>> {
-    let mut s = ds.scan();
-    if let Some(f) = filter {
-        s.filter(f)?;
-    }
-    bounded(&mut s);
-    Ok(s.try_into_stream().await?.try_collect().await?)
-}
-
-/// Keeps Lance's read-ahead of a scan small: by default it may buffer up to 2 GiB of I/O,
-/// which a process keeps resident long after the scan.
-fn bounded(s: &mut lance::dataset::scanner::Scanner) {
-    s.io_buffer_size(SCAN_IO_BUFFER);
-    s.fragment_readahead(2);
-    s.batch_readahead(2);
-}
-
-/// Bytes of I/O a scan buffers ahead of decoding.
-const SCAN_IO_BUFFER: u64 = 64 << 20;
 
 fn col<'a, T: 'static>(b: &'a RecordBatch, name: &str) -> Result<&'a T> {
     b.column_by_name(name)
@@ -753,7 +710,20 @@ fn deltas_batch(deltas: &[(u64, stats::Delta)]) -> Result<RecordBatch> {
 }
 
 /// The filter that selects statistics rows.
-const STATS_ROWS: &str = "series_id = 0 AND stats IS NOT NULL";
+fn stats_rows() -> Pred {
+    Pred::eq("series_id", 0u64).and(Pred::NotNull("stats"))
+}
+
+/// The points of the series in `ids` and their statistics rows.
+fn series_rows(ids: &[u64]) -> Pred {
+    Pred::is_in("series_id", ids.iter().copied())
+        .or(stats_rows().and(Pred::is_in("step", ids.iter().map(|i| *i as i64))))
+}
+
+/// Rows of `runs` matching `pred` other than tombstones.
+fn not_tombstone(pred: Pred) -> Pred {
+    pred.and(Pred::IsNull("fields").or(Pred::ne("fields", fields::DELETED)))
+}
 
 fn read_series_rows(batches: &[RecordBatch]) -> Result<Vec<SeriesInfo>> {
     let mut out = Vec::new();
@@ -799,7 +769,6 @@ fn writer_hash(writer: &str) -> i64 {
 async fn write_all(
     t: &mut Tables,
     left: &mut Buffers,
-    o: &StorageOptions,
     mark: Option<(&str, u64)>,
     deltas: &[(u64, stats::Delta)],
 ) -> Result<()> {
@@ -827,7 +796,7 @@ async fn write_all(
                 fields::ALL,
             ));
         }
-        append(&mut t.runs, runs_batch(&rows)?, o).await?;
+        t.runs.append(vec![runs_batch(&rows)?]).await?;
         left.runs.clear();
     }
     if !left.params.is_empty() {
@@ -835,7 +804,7 @@ async fn write_all(
         if let (Some(id), Some((_, upto))) = (&mark_id, mark) {
             rows.push((upto, id.clone(), String::new(), Value::Null));
         }
-        append(&mut t.params, params_batch(&rows)?, o).await?;
+        t.params.append(vec![params_batch(&rows)?]).await?;
         left.params.clear();
     }
     if !left.series.is_empty() {
@@ -849,7 +818,7 @@ async fn write_all(
                 created_at: now_micros(),
             });
         }
-        append(&mut t.series, series_batch(&rows)?, o).await?;
+        t.series.append(vec![series_batch(&rows)?]).await?;
         left.series.clear();
     }
     if !left.series_ids.is_empty() || !deltas.is_empty() {
@@ -873,7 +842,7 @@ async fn write_all(
         if !deltas.is_empty() {
             batches.push(deltas_batch(deltas)?);
         }
-        append_all(&mut t.metrics, batches, o).await?;
+        t.metrics.append(batches).await?;
         left.relogged.clear();
         left.series_ids.clear();
         left.steps.clear();
@@ -887,7 +856,7 @@ async fn write_all(
 /// Per-table WAL marks of `writer`: the highest committed sequence number of runs, params,
 /// series and metric points.
 async fn marks_of(t: &Tables, writer: &str) -> Result<[u64; 4]> {
-    let id = quote(&format!("{MARK_PREFIX}{writer}"));
+    let id = format!("{MARK_PREFIX}{writer}");
     let max_seq = |batches: Vec<RecordBatch>| -> Result<u64> {
         let mut m = 0;
         for b in &batches {
@@ -896,32 +865,24 @@ async fn marks_of(t: &Tables, writer: &str) -> Result<[u64; 4]> {
         }
         Ok(m)
     };
-    let runs = max_seq(scan(&t.runs, Some(&format!("run_id = {id}"))).await?)?;
-    let params = max_seq(scan(&t.params, Some(&format!("run_id = {id}"))).await?)?;
+    let runs = max_seq(scan(&t.runs, Some(Pred::eq("run_id", &id))).await?)?;
+    let params = max_seq(scan(&t.params, Some(Pred::eq("run_id", &id))).await?)?;
     let mut series = 0;
-    for b in scan(&t.series, Some(&format!("run_id = {id}"))).await? {
+    for b in scan(&t.series, Some(Pred::eq("run_id", &id))).await? {
         let name = col::<StringArray>(&b, "name")?;
         for v in name.iter().flatten() {
             series = series.max(v.parse().unwrap_or(0));
         }
     }
     let mut points = 0;
-    let filter = format!("series_id = 0 AND epoch = {}", writer_hash(writer));
-    for b in scan(&t.metrics, Some(&filter)).await? {
+    let filter = Pred::eq("series_id", 0u64).and(Pred::eq("epoch", writer_hash(writer)));
+    for b in scan(&t.metrics, Some(filter)).await? {
         let step = col::<Int64Array>(&b, "step")?;
         for v in step.values() {
             points = points.max(*v as u64);
         }
     }
     Ok([runs, params, series, points])
-}
-
-/// Fragments below the compaction target: only these can be merged, so only these count.
-fn small_fragments(ds: &Dataset, target: usize) -> usize {
-    ds.fragments()
-        .iter()
-        .filter(|f| f.physical_rows.unwrap_or(0) < target)
-        .count()
 }
 
 impl Core {
@@ -958,19 +919,15 @@ impl Core {
             return Ok(0);
         }
         let mut compacted = 0;
-        let options = CompactionOptions {
-            target_rows_per_fragment: o.compaction_target_rows,
-            ..CompactionOptions::default()
-        };
         // The records tables opened so far: clones, so appends keep going.
-        let mut extra: Vec<Dataset> = self.records.lock().await.values().cloned().collect();
-        for ds in [&mut t.runs, &mut t.params, &mut t.series, &mut t.metrics]
+        let mut extra: Vec<TableRef> = self.records.lock().await.values().cloned().collect();
+        for t in [&mut t.runs, &mut t.params, &mut t.series, &mut t.metrics]
             .into_iter()
             .chain(extra.iter_mut())
         {
-            if small_fragments(ds, o.compaction_target_rows) > o.max_fragments {
-                latest(ds).await?;
-                compact_files(ds, options.clone(), None).await?;
+            if tbl::small_files(t.as_ref(), o.compaction_target_rows) > o.max_fragments {
+                t.latest().await?;
+                t.merge_small(Some(o.compaction_target_rows)).await?;
                 compacted += 1;
             }
         }
@@ -1077,13 +1034,9 @@ const FIELD_COUNT: usize = 10;
 /// keeping tombstones and WAL mark rows as they are, in one commit that keeps rows
 /// appended meanwhile. A run that changes often (a heartbeat every few seconds) otherwise
 /// leaves thousands of rows that every read of the runs merges again. Returns the rows dropped.
-async fn fold_runs(ds: &mut Dataset, opts: &StorageOptions) -> Result<usize> {
-    use lance::dataset::transaction::{Operation, TransactionBuilder, UpdateMode};
-
-    let fragments = ds.fragments().to_vec();
-    let mut sc = ds.scan();
-    sc.with_fragments(fragments.clone());
-    let rows = read_runs(&sc.try_into_stream().await?.try_collect::<Vec<_>>().await?)?;
+async fn fold_runs(t: &mut TableRef) -> Result<usize> {
+    let files: Vec<FileId> = t.files().into_iter().map(|f| f.id).collect();
+    let rows = read_runs(&t.scan(Scan::all().files(files.clone())).await?)?;
     let before = rows.len();
     let (kept, runs): (Vec<_>, Vec<_>) = rows
         .into_iter()
@@ -1105,71 +1058,23 @@ async fn fold_runs(ds: &mut Dataset, opts: &StorageOptions) -> Result<usize> {
     if out.len() == before {
         return Ok(0);
     }
-    let removed: Vec<u64> = fragments.iter().map(|f| f.id).collect();
-    let params = storage::write_params(opts, WriteMode::Append);
-    let base = Arc::new(ds.clone());
-    let txn = InsertBuilder::new(base.clone())
-        .with_params(&params)
-        .execute_uncommitted(vec![runs_batch(&out)?])
-        .await?;
-    let new_fragments = match txn.operation {
-        Operation::Append { fragments } => fragments,
-        other => {
-            return Err(Error::Storage(
-                format!("unexpected uncommitted operation {other:?}").into(),
-            ))
-        }
-    };
-    let op = Operation::Update {
-        removed_fragment_ids: removed,
-        updated_fragments: Vec::new(),
-        new_fragments,
-        fields_modified: Vec::new(),
-        compacted_sstables: Vec::new(),
-        fields_for_preserving_frag_bitmap: Vec::new(),
-        update_mode: Some(UpdateMode::RewriteRows),
-        inserted_rows_filter: None,
-        updated_fragment_offsets: None,
-    };
-    let txn = TransactionBuilder::new(base.version().version, op).build();
-    *ds = lance::dataset::CommitBuilder::new(base)
-        .execute(txn)
-        .await?;
+    let batch = runs_batch(&out)?;
+    let schema = batch.schema();
+    t.replace(
+        files,
+        schema,
+        futures::stream::iter([Ok(batch)]).boxed(),
+        None,
+    )
+    .await?;
     Ok(before - out.len())
 }
 
 /// Points read into memory per pass when sorting the metrics table.
 const SORT_BUCKET_ROWS: usize = 500_000;
 
-/// Metadata key of `metrics` listing the fragments `optimize` wrote sorted (ranges `a-b`).
-const SORTED_KEY: &str = "kv0.sorted_fragments";
-
-fn parse_ranges(s: &str) -> HashSet<u64> {
-    let mut out = HashSet::new();
-    for part in s.split(',').filter(|p| !p.is_empty()) {
-        let (a, b) = part.split_once('-').unwrap_or((part, part));
-        if let (Ok(a), Ok(b)) = (a.parse::<u64>(), b.parse::<u64>()) {
-            out.extend(a..=b.min(a + 10_000_000));
-        }
-    }
-    out
-}
-
-fn format_ranges(ids: &HashSet<u64>) -> String {
-    let mut v: Vec<u64> = ids.iter().copied().collect();
-    v.sort_unstable();
-    let mut out: Vec<String> = Vec::new();
-    let mut i = 0;
-    while i < v.len() {
-        let mut j = i;
-        while j + 1 < v.len() && v[j + 1] == v[j] + 1 {
-            j += 1;
-        }
-        out.push(format!("{}-{}", v[i], v[j]));
-        i = j + 1;
-    }
-    out.join(",")
-}
+/// File tag of the `metrics` files `optimize` wrote sorted.
+const SORTED_TAG: &str = "kv0.sorted";
 
 /// Rewrites the fragments of `metrics` that `optimize` has not sorted yet, sorted by
 /// `(series_id, step)`, in one commit, keeping only the latest point of each step and only
@@ -1178,39 +1083,23 @@ fn format_ranges(ids: &HashSet<u64>) -> String {
 /// series' last stored step), in which case every fragment is rewritten. Series are processed
 /// in hash ranges of about [`SORT_BUCKET_ROWS`] points, so memory stays bounded; appends
 /// committed meanwhile by other writers are kept. Returns whether anything was rewritten.
-async fn sort_metrics(
-    ds: &mut Dataset,
-    opts: &StorageOptions,
-    live: Arc<HashSet<u64>>,
-) -> Result<bool> {
-    use futures::{StreamExt, TryFutureExt};
-    use lance::dataset::transaction::{Operation, TransactionBuilder, UpdateMode};
-    use lance::deps::datafusion::error::DataFusionError;
-    use lance::deps::datafusion::physical_plan::stream::RecordBatchStreamAdapter;
-    use lance::deps::datafusion::physical_plan::SendableRecordBatchStream;
-
-    let all: Vec<lance::table::format::Fragment> = ds.fragments().to_vec();
-    let present: HashSet<u64> = all.iter().map(|f| f.id).collect();
-    let recorded: HashSet<u64> = ds
-        .metadata()
-        .get(SORTED_KEY)
-        .map(|s| parse_ranges(s))
-        .unwrap_or_default();
-    let sorted: HashSet<u64> = recorded.intersection(&present).copied().collect();
-    let (old, new): (Vec<_>, Vec<_>) = all.into_iter().partition(|f| sorted.contains(&f.id));
+async fn sort_metrics(t: &mut TableRef, live: Arc<HashSet<u64>>) -> Result<bool> {
+    let all = t.files();
+    let sorted = t.tagged(SORTED_TAG);
+    let (old, new): (Vec<_>, Vec<_>) = all.into_iter().partition(|f| sorted.files.contains(&f.id));
     if new.is_empty() {
         return Ok(false);
     }
-    // A sorted fragment gone (merged by background compaction, or emptied by a delete) may
-    // have moved sorted points or their exact statistics into the fragments to rewrite: sort
-    // everything rather than reason about the mix.
-    let moved = recorded.len() != sorted.len() || {
-        let mut sc = ds.scan();
-        sc.with_fragments(new.clone());
-        sc.project(&["stats"])?;
-        sc.filter(STATS_ROWS)?;
+    let ids = |files: &[tbl::TableFile]| files.iter().map(|f| f.id.clone()).collect::<Vec<_>>();
+    // A sorted file gone (merged by background compaction, or emptied by a delete) may have
+    // moved sorted points or their exact statistics into the files to rewrite: sort everything
+    // rather than reason about the mix.
+    let moved = sorted.lost || {
+        let scan = Scan::filter(stats_rows())
+            .columns(&["stats"])
+            .files(ids(&new));
         let mut exact = false;
-        for b in sc.try_into_stream().await?.try_collect::<Vec<_>>().await? {
+        for b in t.scan(scan).await? {
             let enc = col::<arrow_array::BinaryArray>(&b, "stats")?;
             for i in 0..b.num_rows() {
                 // Statistics written by optimize (sequence 0), not by a flush.
@@ -1220,14 +1109,13 @@ async fn sort_metrics(
         }
         exact
     };
-    // Would a new point overwrite a step of a sorted fragment? Then sort everything.
+    // Would a new point overwrite a step of a sorted file? Then sort everything.
     let full = old.is_empty() || moved || {
         let mut last: HashMap<u64, i64> = HashMap::new();
-        let mut sc = ds.scan();
-        sc.with_fragments(old.clone());
-        sc.project(&["step", "stats"])?;
-        sc.filter(STATS_ROWS)?;
-        for b in sc.try_into_stream().await?.try_collect::<Vec<_>>().await? {
+        let scan = Scan::filter(stats_rows())
+            .columns(&["step", "stats"])
+            .files(ids(&old));
+        for b in t.scan(scan).await? {
             let step = col::<Int64Array>(&b, "step")?;
             let enc = col::<arrow_array::BinaryArray>(&b, "stats")?;
             for i in 0..b.num_rows() {
@@ -1236,12 +1124,11 @@ async fn sort_metrics(
                 *e = (*e).max(d.s.last_step);
             }
         }
-        let mut sc = ds.scan();
-        sc.with_fragments(new.clone());
-        sc.project(&["series_id", "step"])?;
-        sc.filter("series_id <> 0")?;
+        let scan = Scan::filter(Pred::ne("series_id", 0u64))
+            .columns(&["series_id", "step"])
+            .files(ids(&new));
         let mut overlap = false;
-        for b in sc.try_into_stream().await?.try_collect::<Vec<_>>().await? {
+        for b in t.scan(scan).await? {
             let id = col::<UInt64Array>(&b, "series_id")?;
             let step = col::<Int64Array>(&b, "step")?;
             for i in 0..b.num_rows() {
@@ -1257,75 +1144,37 @@ async fn sort_metrics(
     } else {
         (old, new)
     };
-    let removed: Vec<u64> = rewrite.iter().map(|f| f.id).collect();
-    let rows: usize = rewrite.iter().map(|f| f.physical_rows.unwrap_or(0)).sum();
+    let removed = ids(&rewrite);
+    let rows: usize = rewrite.iter().map(|f| f.rows).sum();
     let buckets = (rows / SORT_BUCKET_ROWS + 1) as u64;
     let width = u64::MAX / buckets;
-    let src = Arc::new(ds.clone());
-    let frags = Arc::new(rewrite);
+    let src = Arc::new(t.clone());
+    let files = Arc::new(removed.clone());
     let stream = futures::stream::iter(0..buckets)
         .then(move |i| {
-            let (src, live, frags) = (src.clone(), live.clone(), frags.clone());
+            let (src, live, files) = (src.clone(), live.clone(), files.clone());
             async move {
                 let lo = i * width;
                 let filter = if i + 1 == buckets {
-                    format!("series_id >= {lo}")
+                    Pred::ge("series_id", lo)
                 } else {
-                    format!("series_id >= {lo} AND series_id < {}", lo + width)
+                    Pred::ge("series_id", lo).and(Pred::lt("series_id", lo + width))
                 };
-                let mut s = src.scan();
-                s.with_fragments(frags.to_vec());
-                s.filter(&filter)?;
-                // One bucket at a time is the memory bound; keep Lance's read-ahead small too.
-                bounded(&mut s);
-                let batches: Vec<RecordBatch> = s.try_into_stream().await?.try_collect().await?;
+                // One bucket at a time is the memory bound; keep the read-ahead small too.
+                let scan = Scan::filter(filter).files(files.to_vec()).bounded();
+                let batches = src.scan(scan).await?;
                 sorted_points(batches, &live)
             }
-            .map_err(|e: Error| DataFusionError::External(Box::new(e)))
         })
         .map_ok(|batches| futures::stream::iter(batches.into_iter().map(Ok)))
-        .try_flatten();
-    let source: SendableRecordBatchStream = Box::pin(RecordBatchStreamAdapter::new(
-        schema::METRICS.clone(),
-        stream,
-    ));
-    let params = storage::write_params(opts, WriteMode::Append);
-    let base = Arc::new(ds.clone());
-    let txn = InsertBuilder::new(base.clone())
-        .with_params(&params)
-        .execute_uncommitted_stream(source)
-        .await?;
-    let new_fragments = match txn.operation {
-        Operation::Append { fragments } => fragments,
-        other => {
-            return Err(Error::Storage(
-                format!("unexpected uncommitted operation {other:?}").into(),
-            ))
-        }
+        .try_flatten()
+        .boxed();
+    // The rewritten files are sorted, and so are the ones kept.
+    let tag = FileTag {
+        key: SORTED_TAG,
+        keep: keep.into_iter().map(|f| f.id).collect(),
     };
-    let added = new_fragments.len();
-    let op = Operation::Update {
-        removed_fragment_ids: removed,
-        updated_fragments: Vec::new(),
-        new_fragments,
-        fields_modified: Vec::new(),
-        compacted_sstables: Vec::new(),
-        fields_for_preserving_frag_bitmap: Vec::new(),
-        update_mode: Some(UpdateMode::RewriteRows),
-        inserted_rows_filter: None,
-        updated_fragment_offsets: None,
-    };
-    let txn = TransactionBuilder::new(base.version().version, op).build();
-    *ds = lance::dataset::CommitBuilder::new(base)
-        .execute(txn)
-        .await?;
-    // This commit's fragments got the highest ids of its version; record them as sorted. A
-    // crash before this leaves them unsorted, which only costs a rewrite next time.
-    let mut ids: Vec<u64> = ds.fragments().iter().map(|f| f.id).collect();
-    ids.sort_unstable();
-    let mut sorted: HashSet<u64> = keep.iter().map(|f| f.id).collect();
-    sorted.extend(ids.iter().rev().take(added));
-    ds.update_metadata([(SORTED_KEY, format_ranges(&sorted).as_str())])
+    t.replace(removed, schema::METRICS.clone(), stream, Some(tag))
         .await?;
     Ok(true)
 }
@@ -1404,22 +1253,15 @@ fn sorted_points(batches: Vec<RecordBatch>, live: &HashSet<u64>) -> Result<Vec<R
 /// Exact statistics of the series in `ids`, read from their points in `metrics`: a step
 /// written twice counts once, with the value reads return.
 async fn exact_from_points(
-    metrics: &Dataset,
+    metrics: &TableRef,
     ids: &HashSet<u64>,
 ) -> Result<HashMap<u64, SeriesStats>> {
     let mut out: HashMap<u64, SeriesStats> = HashMap::new();
     let list: Vec<u64> = ids.iter().copied().collect();
     for chunk in list.chunks(1000) {
-        let filter = format!(
-            "series_id IN ({})",
-            chunk
-                .iter()
-                .map(u64::to_string)
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
+        let filter = Pred::is_in("series_id", chunk.iter().copied());
         let (mut i, mut st, mut v, mut ts) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-        for b in scan(metrics, Some(&filter)).await? {
+        for b in scan(metrics, Some(filter)).await? {
             i.extend_from_slice(col::<UInt64Array>(&b, "series_id")?.values());
             st.extend_from_slice(col::<Int64Array>(&b, "step")?.values());
             ts.extend_from_slice(col::<TimestampMicrosecondArray>(&b, "timestamp")?.values());
@@ -1434,12 +1276,12 @@ async fn exact_from_points(
 /// mark older than `ttl`. One delete per table, only when there is something to delete.
 async fn prune_marks(t: &mut Tables, ttl: Duration) -> Result<()> {
     let cutoff = now_nanos().saturating_sub(ttl.as_nanos() as u64);
-    let like = format!("run_id LIKE {}", quote(&format!("{MARK_PREFIX}%")));
+    let like = Pred::StartsWith("run_id", MARK_PREFIX.to_string());
     // runs and params carry the sequence number in `seq`.
     for ds in [&mut t.runs, &mut t.params] {
-        latest(ds).await?;
+        ds.latest().await?;
         let mut best: HashMap<String, (u64, usize)> = HashMap::new();
-        for b in scan(ds, Some(&like)).await? {
+        for b in scan(ds, Some(like.clone())).await? {
             let id = col::<StringArray>(&b, "run_id")?;
             let seq = col::<UInt64Array>(&b, "seq")?;
             for i in 0..b.num_rows() {
@@ -1450,25 +1292,25 @@ async fn prune_marks(t: &mut Tables, ttl: Duration) -> Result<()> {
                 }
             }
         }
-        let preds: Vec<String> = best
+        let preds: Vec<Pred> = best
             .iter()
             .filter(|(_, (max, n))| *n > 1 || *max <= cutoff)
             .map(|(id, (max, _))| {
                 if *max <= cutoff {
-                    format!("run_id = {}", quote(id))
+                    Pred::eq("run_id", id)
                 } else {
-                    format!("(run_id = {} AND seq < {max})", quote(id))
+                    Pred::eq("run_id", id).and(Pred::lt("seq", *max))
                 }
             })
             .collect();
         if !preds.is_empty() {
-            ds.delete(&preds.join(" OR ")).await?;
+            ds.rewrite_where(Pred::Or(preds)).await?;
         }
     }
     // series: the sequence number is the `name`.
-    latest(&mut t.series).await?;
+    t.series.latest().await?;
     let mut best: HashMap<String, (u64, usize)> = HashMap::new();
-    for b in scan(&t.series, Some(&like)).await? {
+    for b in scan(&t.series, Some(like)).await? {
         let id = col::<StringArray>(&b, "run_id")?;
         let name = col::<StringArray>(&b, "name")?;
         for i in 0..b.num_rows() {
@@ -1479,28 +1321,24 @@ async fn prune_marks(t: &mut Tables, ttl: Duration) -> Result<()> {
             }
         }
     }
-    let preds: Vec<String> = best
+    let preds: Vec<Pred> = best
         .iter()
         .filter(|(_, (max, n))| *n > 1 || *max <= cutoff)
         .map(|(id, (max, _))| {
             if *max <= cutoff {
-                format!("run_id = {}", quote(id))
+                Pred::eq("run_id", id)
             } else {
-                format!(
-                    "(run_id = {} AND name <> {})",
-                    quote(id),
-                    quote(&max.to_string())
-                )
+                Pred::eq("run_id", id).and(Pred::ne("name", max.to_string()))
             }
         })
         .collect();
     if !preds.is_empty() {
-        t.series.delete(&preds.join(" OR ")).await?;
+        t.series.rewrite_where(Pred::Or(preds)).await?;
     }
     // metrics: series_id 0, the writer's hash in `epoch`, the sequence number in `step`.
-    latest(&mut t.metrics).await?;
+    t.metrics.latest().await?;
     let mut best: HashMap<i64, (i64, usize)> = HashMap::new();
-    for b in scan(&t.metrics, Some("series_id = 0")).await? {
+    for b in scan(&t.metrics, Some(Pred::eq("series_id", 0u64))).await? {
         let epoch = col::<Int64Array>(&b, "epoch")?;
         let step = col::<Int64Array>(&b, "step")?;
         for i in 0..b.num_rows() {
@@ -1511,19 +1349,20 @@ async fn prune_marks(t: &mut Tables, ttl: Duration) -> Result<()> {
             }
         }
     }
-    let preds: Vec<String> = best
+    let preds: Vec<Pred> = best
         .iter()
         .filter(|(_, (max, n))| *n > 1 || (*max as u64) <= cutoff)
         .map(|(h, (max, _))| {
+            let mark = Pred::eq("series_id", 0u64).and(Pred::eq("epoch", *h));
             if (*max as u64) <= cutoff {
-                format!("(series_id = 0 AND epoch = {h})")
+                mark
             } else {
-                format!("(series_id = 0 AND epoch = {h} AND step < {max})")
+                mark.and(Pred::lt("step", *max))
             }
         })
         .collect();
     if !preds.is_empty() {
-        t.metrics.delete(&preds.join(" OR ")).await?;
+        t.metrics.rewrite_where(Pred::Or(preds)).await?;
     }
     Ok(())
 }
@@ -1720,23 +1559,22 @@ impl Core {
                 )
                 .into_iter()
                 .collect();
-                let before = t.runs.version().version;
+                let before = t.runs.version();
                 let r = write_all(
                     &mut t,
                     &mut taken,
-                    &self.opts.storage_options,
                     mark.as_ref().map(|(w, s)| (w.as_str(), *s)),
                     &deltas,
                 )
                 .await;
-                // Exactly one version later: the new fragments are this flush's own, which
-                // hold no tombstones, so later flushes need not read them.
-                if r.is_ok() && t.runs.version().version == before + 1 {
+                // Exactly one version later: the new files are this flush's own, which hold no
+                // tombstones, so later flushes need not read them.
+                if r.is_ok() && t.runs.version() == before + 1 {
                     let mut seen = self.tombstones_read.lock();
-                    let ours: Vec<u64> = t
+                    let ours: Vec<FileId> = t
                         .runs
-                        .fragments()
-                        .iter()
+                        .files()
+                        .into_iter()
                         .map(|f| f.id)
                         .filter(|id| !seen.contains(id))
                         .collect();
@@ -1765,10 +1603,10 @@ impl Core {
         r
     }
 
-    /// Runs deleted so far, reading only `runs` fragments not read before. With `fresh`,
+    /// Runs deleted so far, reading only `runs` files not read before. With `fresh`,
     /// first checks for a newer version of `runs`; otherwise (flushes) at most once per
     /// [`TOMBSTONE_CHECK_INTERVAL`], so a flush costs no object-store listing.
-    async fn tombstones(&self, runs: &mut Dataset, fresh: bool) -> Result<HashSet<String>> {
+    async fn tombstones(&self, runs: &mut TableRef, fresh: bool) -> Result<HashSet<String>> {
         let due = fresh || {
             let mut last = self.tombstones_checked.lock();
             let due = last.is_none_or(|at| at.elapsed() >= TOMBSTONE_CHECK_INTERVAL);
@@ -1778,22 +1616,21 @@ impl Core {
             due
         };
         if due {
-            latest(runs).await?;
+            runs.latest().await?;
         }
-        let new: Vec<lance::table::format::Fragment> = {
+        let new: Vec<FileId> = {
             let seen = self.tombstones_read.lock();
-            runs.fragments()
-                .iter()
-                .filter(|f| !seen.contains(&f.id))
-                .cloned()
+            runs.files()
+                .into_iter()
+                .map(|f| f.id)
+                .filter(|id| !seen.contains(id))
                 .collect()
         };
         if !new.is_empty() {
-            let mut sc = runs.scan();
-            sc.with_fragments(new.clone());
-            sc.project(&["run_id", "fields"])?;
-            sc.filter(&format!("fields = {}", fields::DELETED))?;
-            let batches: Vec<RecordBatch> = sc.try_into_stream().await?.try_collect().await?;
+            let scan = Scan::filter(Pred::eq("fields", fields::DELETED))
+                .columns(&["run_id", "fields"])
+                .files(new.clone());
+            let batches = runs.scan(scan).await?;
             let mut dead = self.deleted.lock();
             for b in &batches {
                 let id = col::<StringArray>(b, "run_id")?;
@@ -1801,7 +1638,7 @@ impl Core {
                     dead.insert(id.value(i).to_string());
                 }
             }
-            self.tombstones_read.lock().extend(new.iter().map(|f| f.id));
+            self.tombstones_read.lock().extend(new);
         }
         Ok(self.deleted.lock().clone())
     }
@@ -1835,17 +1672,11 @@ impl Core {
         }
         if !unknown.is_empty() {
             // Only after a WAL replay: series committed before the crash.
-            latest(&mut t.series).await?;
+            t.series.latest().await?;
             let list: Vec<u64> = unknown.iter().copied().collect();
             for chunk in list.chunks(1000) {
-                let ids = chunk
-                    .iter()
-                    .map(u64::to_string)
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                for s in read_series_rows(
-                    &scan(&t.series, Some(&format!("series_id IN ({ids})"))).await?,
-                )? {
+                let ids = Pred::is_in("series_id", chunk.iter().copied());
+                for s in read_series_rows(&scan(&t.series, Some(ids)).await?)? {
                     run_of.insert(s.series_id, s.run_id.clone());
                     self.known_series.lock().insert(s.series_id, s.run_id);
                 }
@@ -1916,7 +1747,7 @@ impl Core {
     async fn runs(&self) -> Result<Vec<RunInfo>> {
         self.flush().await?;
         let mut t = self.tables.lock().await;
-        latest(&mut t.runs).await?;
+        t.runs.latest().await?;
         let rows: Vec<_> = read_runs(&scan(&t.runs, None).await?)?
             .into_iter()
             .filter(|r| !r.1.run_id.starts_with(MARK_PREFIX))
@@ -1933,8 +1764,8 @@ impl Core {
     async fn run(&self, run_id: &str) -> Result<Option<RunInfo>> {
         self.flush().await?;
         let mut t = self.tables.lock().await;
-        latest(&mut t.runs).await?;
-        let rows = read_runs(&scan(&t.runs, Some(&format!("run_id = {}", quote(run_id)))).await?)?;
+        t.runs.latest().await?;
+        let rows = read_runs(&scan(&t.runs, Some(Pred::eq("run_id", run_id))).await?)?;
         Ok(merge_runs(rows).remove(run_id).map(|r| r.1))
     }
 
@@ -1944,8 +1775,8 @@ impl Core {
         if self.tombstones(&mut t.runs, true).await?.contains(run_id) {
             return Ok(Value::Object(Default::default()));
         }
-        latest(&mut t.params).await?;
-        let batches = scan(&t.params, Some(&format!("run_id = {}", quote(run_id)))).await?;
+        t.params.latest().await?;
+        let batches = scan(&t.params, Some(Pred::eq("run_id", run_id))).await?;
         let mut current: BTreeMap<String, (u64, Value)> = BTreeMap::new();
         for b in &batches {
             let seq = col::<UInt64Array>(b, "seq")?;
@@ -1972,10 +1803,8 @@ impl Core {
         if self.tombstones(&mut t.runs, true).await?.contains(run_id) {
             return Ok(Vec::new());
         }
-        latest(&mut t.series).await?;
-        let rows = read_series_rows(
-            &scan(&t.series, Some(&format!("run_id = {}", quote(run_id)))).await?,
-        )?;
+        t.series.latest().await?;
+        let rows = read_series_rows(&scan(&t.series, Some(Pred::eq("run_id", run_id))).await?)?;
         self.known_series
             .lock()
             .extend(rows.iter().map(|s| (s.series_id, s.run_id.clone())));
@@ -1986,7 +1815,7 @@ impl Core {
         self.flush().await?;
         let mut t = self.tables.lock().await;
         let dead = self.tombstones(&mut t.runs, true).await?;
-        latest(&mut t.params).await?;
+        t.params.latest().await?;
         let batches = scan(&t.params, None).await?;
         let mut current: HashMap<String, BTreeMap<String, (u64, Value)>> = HashMap::new();
         for b in &batches {
@@ -2023,7 +1852,7 @@ impl Core {
         self.flush().await?;
         let mut t = self.tables.lock().await;
         let dead = self.tombstones(&mut t.runs, true).await?;
-        latest(&mut t.series).await?;
+        t.series.latest().await?;
         let rows: Vec<SeriesInfo> = read_series_rows(&scan(&t.series, None).await?)?
             .into_iter()
             .filter(|s| !s.run_id.starts_with(MARK_PREFIX) && !dead.contains(&s.run_id))
@@ -2040,34 +1869,23 @@ impl Core {
         self.flush().await?;
         let ds = {
             let mut t = self.tables.lock().await;
-            latest(&mut t.metrics).await?;
+            t.metrics.latest().await?;
             t.metrics.clone()
         };
         let mut merged: HashMap<u64, stats::Delta> = HashMap::new();
-        let chunks: Vec<Option<String>> = match ids {
+        let chunks: Vec<Option<&[u64]>> = match ids {
             None => vec![None],
             Some([]) => return Ok(HashMap::new()),
-            Some(ids) => ids
-                .chunks(1000)
-                .map(|c| {
-                    Some(
-                        c.iter()
-                            .map(|i| (*i as i64).to_string())
-                            .collect::<Vec<_>>()
-                            .join(", "),
-                    )
-                })
-                .collect(),
+            Some(ids) => ids.chunks(1000).map(Some).collect(),
         };
         for c in chunks {
             let filter = match c {
-                None => STATS_ROWS.to_string(),
-                Some(list) => format!("{STATS_ROWS} AND step IN ({list})"),
+                None => stats_rows(),
+                Some(list) => stats_rows().and(Pred::is_in("step", list.iter().map(|i| *i as i64))),
             };
-            let mut sc = ds.scan();
-            sc.project(&["step", "stats"])?;
-            sc.filter(&filter)?;
-            let batches: Vec<RecordBatch> = sc.try_into_stream().await?.try_collect().await?;
+            let batches = ds
+                .scan(Scan::filter(filter).columns(&["step", "stats"]))
+                .await?;
             for b in &batches {
                 let step = col::<Int64Array>(b, "step")?;
                 let enc = col::<arrow_array::BinaryArray>(b, "stats")?;
@@ -2120,10 +1938,10 @@ impl Core {
 
     /// Records table `table` at its latest version; created when `create`, else `None` when
     /// it does not exist.
-    async fn record_ds(&self, table: &str, create: bool) -> Result<Option<Dataset>> {
+    async fn record_ds(&self, table: &str, create: bool) -> Result<Option<TableRef>> {
         let mut g = self.records.lock().await;
         if let Some(ds) = g.get_mut(table) {
-            latest(ds).await?;
+            ds.latest().await?;
             return Ok(Some(ds.clone()));
         }
         let create = create && self.opts.create_if_missing;
@@ -2146,17 +1964,15 @@ impl Core {
     }
 
     /// Keeps `ds` as the newest known version of `table`.
-    async fn keep_record_ds(&self, table: &str, ds: Dataset) {
+    async fn keep_record_ds(&self, table: &str, ds: TableRef) {
         let mut g = self.records.lock().await;
-        if g.get(table)
-            .is_none_or(|old| old.version().version <= ds.version().version)
-        {
+        if g.get(table).is_none_or(|old| old.version() <= ds.version()) {
             g.insert(table.to_string(), ds);
         }
     }
 
     /// Every records table, at its latest version.
-    async fn all_record_ds(&self) -> Result<Vec<(String, Dataset)>> {
+    async fn all_record_ds(&self) -> Result<Vec<(String, TableRef)>> {
         let mut names: HashSet<String> = records::tables(&self.uri, &self.opts.storage_options)
             .await?
             .into_iter()
@@ -2180,14 +1996,14 @@ impl Core {
             ))
         })?;
         if rows.is_empty() {
-            return Ok(ds.version().version);
+            return Ok(ds.version());
         }
         let seqs: Vec<u64> = {
             let mut b = self.buffers.lock();
             rows.iter().map(|_| b.clock.next()).collect()
         };
         let batch = records::batch(table, &rows, &seqs, now_micros())?;
-        let v = records::append(&mut ds, batch, &self.opts.storage_options).await?;
+        let v = records::append(&mut ds, batch).await?;
         self.keep_record_ds(table, ds).await;
         Ok(v)
     }
@@ -2201,14 +2017,14 @@ impl Core {
         };
         let ds = match &q.at {
             At::Latest => ds,
-            At::Version(v) => ds.checkout_version(*v).await?,
-            At::Tag(t) => ds.checkout_version(t.as_str()).await?,
+            At::Version(v) => ds.checkout(*v).await?,
+            At::Tag(t) => ds.checkout_tag(t).await?,
         };
         records::read(&ds, &q).await
     }
 
     /// A records table that must exist.
-    async fn existing_record_ds(&self, table: &str) -> Result<Dataset> {
+    async fn existing_record_ds(&self, table: &str) -> Result<TableRef> {
         self.record_ds(table, false)
             .await?
             .ok_or_else(|| Error::NotFound(format!("records table {table:?}")))
@@ -2222,17 +2038,13 @@ impl Core {
         let mut t = self.tables.lock().await;
         let t = &mut *t;
         for ds in [&mut t.runs, &mut t.params, &mut t.series, &mut t.metrics] {
-            latest(ds).await?;
+            ds.latest().await?;
         }
-        let list = run_ids
-            .iter()
-            .map(|r| quote(r))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let pred = format!("run_id IN ({list})");
-        let existing: HashSet<String> = merge_runs(read_runs(&scan(&t.runs, Some(&pred)).await?)?)
-            .into_keys()
-            .collect();
+        let pred = Pred::is_in("run_id", run_ids);
+        let existing: HashSet<String> =
+            merge_runs(read_runs(&scan(&t.runs, Some(pred.clone())).await?)?)
+                .into_keys()
+                .collect();
         // Tombstones first: from their commit on, readers hide the runs and writers (here or
         // elsewhere, and WAL replays) drop further writes to them.
         let rows: Vec<(u64, RunInfo, u32)> = {
@@ -2262,45 +2074,26 @@ impl Core {
                 })
                 .collect()
         };
-        append(&mut t.runs, runs_batch(&rows)?, &self.opts.storage_options).await?;
+        t.runs.append(vec![runs_batch(&rows)?]).await?;
         self.deleted.lock().extend(run_ids.iter().cloned());
-        let series: Vec<u64> = read_series_rows(&scan(&t.series, Some(&pred)).await?)?
+        let series: Vec<u64> = read_series_rows(&scan(&t.series, Some(pred.clone())).await?)?
             .into_iter()
             .map(|s| s.series_id)
             .collect();
         // Points and their statistics first: a crash part-way leaves runs whose points are
         // gone, never points without a series to name them. Running it again finishes it.
         for chunk in series.chunks(1000) {
-            let ids = chunk
-                .iter()
-                .map(u64::to_string)
-                .collect::<Vec<_>>()
-                .join(", ");
-            let steps = chunk
-                .iter()
-                .map(|i| (*i as i64).to_string())
-                .collect::<Vec<_>>()
-                .join(", ");
-            t.metrics
-                .delete(&format!(
-                    "series_id IN ({ids}) OR ({STATS_ROWS} AND step IN ({steps}))"
-                ))
-                .await?;
+            t.metrics.rewrite_where(series_rows(chunk)).await?;
         }
-        t.series.delete(&pred).await?;
-        t.params.delete(&pred).await?;
+        t.series.rewrite_where(pred.clone()).await?;
+        t.params.rewrite_where(pred.clone()).await?;
         for (name, mut ds) in self.all_record_ds().await? {
-            if ds.count_rows(Some(pred.clone())).await? > 0 {
-                ds.delete(&pred).await?;
+            if ds.count(Some(pred.clone())).await? > 0 {
+                ds.rewrite_where(pred.clone()).await?;
                 self.keep_record_ds(&name, ds).await;
             }
         }
-        t.runs
-            .delete(&format!(
-                "{pred} AND (fields IS NULL OR fields <> {})",
-                fields::DELETED
-            ))
-            .await?;
+        t.runs.rewrite_where(not_tombstone(pred)).await?;
         {
             let mut known = self.known_series.lock();
             for s in &series {
@@ -2322,20 +2115,19 @@ impl Core {
         self.flush().await?;
         let ds = {
             let mut t = self.tables.lock().await;
-            latest(&mut t.metrics).await?;
+            t.metrics.latest().await?;
             t.metrics.clone()
         };
-        let ids: Vec<String> = series_ids.iter().map(u64::to_string).collect();
-        let mut filter = if ids.len() == 1 {
-            format!("series_id = {}", ids[0])
+        let mut filter = if series_ids.len() == 1 {
+            Pred::eq("series_id", series_ids[0])
         } else {
-            format!("series_id IN ({})", ids.join(", "))
+            Pred::is_in("series_id", series_ids.iter().copied())
         };
         if let Some(s) = range.start {
-            filter.push_str(&format!(" AND step >= {s}"));
+            filter = filter.and(Pred::ge("step", s));
         }
         if let Some(s) = range.stop {
-            filter.push_str(&format!(" AND step < {s}"));
+            filter = filter.and(Pred::lt("step", s));
         }
         // The time range applies after the later point of each step is chosen, so an overwritten
         // point is never returned because its replacement falls outside the range. To stay
@@ -2344,15 +2136,14 @@ impl Core {
         if time.start.is_some() || time.stop.is_some() {
             let mut f = filter.clone();
             if let Some(t) = time.start {
-                f.push_str(&format!(" AND timestamp >= to_timestamp_micros({t})"));
+                f = f.and(Pred::Cmp("timestamp", Cmp::Ge, Lit::TimestampMicros(t)));
             }
             if let Some(t) = time.stop {
-                f.push_str(&format!(" AND timestamp < to_timestamp_micros({t})"));
+                f = f.and(Pred::Cmp("timestamp", Cmp::Lt, Lit::TimestampMicros(t)));
             }
-            let mut sc = ds.scan();
-            sc.project(&["series_id", "step"])?;
-            sc.filter(&f)?;
-            let hits: Vec<RecordBatch> = sc.try_into_stream().await?.try_collect().await?;
+            let hits = ds
+                .scan(Scan::filter(f).columns(&["series_id", "step"]))
+                .await?;
             let mut span: HashMap<u64, (i64, i64)> = HashMap::new();
             for b in &hits {
                 let id = col::<UInt64Array>(b, "series_id")?;
@@ -2368,21 +2159,19 @@ impl Core {
             if span.is_empty() {
                 return Ok(HashMap::new());
             }
-            filter = span
-                .iter()
-                .map(|(id, (lo, hi))| {
-                    format!("(series_id = {id} AND step >= {lo} AND step <= {hi})")
-                })
-                .collect::<Vec<_>>()
-                .join(" OR ");
+            filter = Pred::Or(
+                span.iter()
+                    .map(|(id, (lo, hi))| {
+                        Pred::eq("series_id", *id)
+                            .and(Pred::ge("step", *lo))
+                            .and(Pred::le("step", *hi))
+                    })
+                    .collect(),
+            );
         }
-        // Chart reads keep Lance's default read-ahead: they are latency-bound on object stores
-        // and return what they read.
-        let batches: Vec<RecordBatch> = {
-            let mut s = ds.scan();
-            s.filter(&filter)?;
-            s.try_into_stream().await?.try_collect().await?
-        };
+        // Chart reads keep the engine's default read-ahead: they are latency-bound on object
+        // stores and return what they read.
+        let batches = ds.scan(Scan::filter(filter)).await?;
         // (step, arrival order, ...) per series, so the later of two points at one step wins.
         type Point = (i64, usize, Option<i64>, i64, f64);
         let mut rows: HashMap<u64, Vec<Point>> = HashMap::new();
@@ -2432,12 +2221,12 @@ impl Core {
         let mut t = self.tables.lock().await;
         let t = &mut *t;
         for ds in [&mut t.runs, &mut t.params, &mut t.series, &mut t.metrics] {
-            latest(ds).await?;
+            ds.latest().await?;
         }
         let mut recs = self.all_record_ds().await?;
         // Every run with a tombstone, read in full.
         let dead: Vec<String> =
-            read_runs(&scan(&t.runs, Some(&format!("fields = {}", fields::DELETED))).await?)?
+            read_runs(&scan(&t.runs, Some(Pred::eq("fields", fields::DELETED))).await?)?
                 .into_iter()
                 .map(|r| r.1.run_id)
                 .collect::<HashSet<_>>()
@@ -2447,17 +2236,12 @@ impl Core {
             runs: dead.len(),
             ..Default::default()
         };
-        let pred = if dead.is_empty() {
-            None
-        } else {
-            let list = dead.iter().map(|r| quote(r)).collect::<Vec<_>>().join(", ");
-            Some(format!("run_id IN ({list})"))
-        };
+        let pred = (!dead.is_empty()).then(|| Pred::is_in("run_id", &dead));
         // Records tables are tagged one by one, so a tag on a table without rows of a deleted
         // run (an evaluation dataset, say) does not stand in the way.
         let mut pinned: Vec<(String, String, u64)> = Vec::new();
         {
-            let mut tables: Vec<(String, &Dataset, bool)> = vec![
+            let mut tables: Vec<(String, &TableRef, bool)> = vec![
                 ("runs".into(), &t.runs, true),
                 ("params".into(), &t.params, true),
                 ("series".into(), &t.series, true),
@@ -2467,22 +2251,19 @@ impl Core {
                 tables.push((format!("records table {name:?}"), ds, true));
             }
             for (name, ds, by_run) in tables {
-                for (tag, v) in storage::lance::old_tags(ds).await? {
+                for (tag, v) in tbl::old_tags(ds.as_ref()).await? {
                     let holds = match (&pred, by_run) {
                         (_, false) => true,
                         (None, true) => false,
                         (Some(pred), true) => {
-                            let old = ds.checkout_version(v).await?;
+                            let old = ds.checkout(v).await?;
                             // In runs, the tombstones themselves hold no data.
                             let filter = if name == "runs" {
-                                format!(
-                                    "{pred} AND (fields IS NULL OR fields <> {})",
-                                    fields::DELETED
-                                )
+                                not_tombstone(pred.clone())
                             } else {
                                 pred.clone()
                             };
-                            old.count_rows(Some(filter)).await? > 0
+                            old.count(Some(filter)).await? > 0
                         }
                     };
                     if holds {
@@ -2503,7 +2284,7 @@ impl Core {
                 )));
             }
             for (table, tag, _) in &pinned {
-                let ds: &Dataset = match table.as_str() {
+                let ds: &TableRef = match table.as_str() {
                     "runs" => &t.runs,
                     "params" => &t.params,
                     "series" => &t.series,
@@ -2514,47 +2295,28 @@ impl Core {
                         .map(|(_, d)| d)
                         .expect("listed"),
                 };
-                ds.tags().delete(tag).await?;
+                ds.delete_tag(tag).await?;
                 report.tags_deleted.push(format!("{tag} ({table})"));
             }
         }
         // Only now change anything: a refused purge leaves the repository as it was. First the
         // rows a writer racing a delete committed after it.
         if let Some(pred) = &pred {
-            let series: Vec<u64> = read_series_rows(&scan(&t.series, Some(pred)).await?)?
+            let series: Vec<u64> = read_series_rows(&scan(&t.series, Some(pred.clone())).await?)?
                 .into_iter()
                 .map(|s| s.series_id)
                 .collect();
             for chunk in series.chunks(1000) {
-                let ids = chunk
-                    .iter()
-                    .map(u64::to_string)
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                let steps = chunk
-                    .iter()
-                    .map(|i| (*i as i64).to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                t.metrics
-                    .delete(&format!(
-                        "series_id IN ({ids}) OR ({STATS_ROWS} AND step IN ({steps}))"
-                    ))
-                    .await?;
+                t.metrics.rewrite_where(series_rows(chunk)).await?;
             }
-            t.series.delete(pred).await?;
-            t.params.delete(pred).await?;
+            t.series.rewrite_where(pred.clone()).await?;
+            t.params.rewrite_where(pred.clone()).await?;
             for (_, ds) in recs.iter_mut() {
-                if ds.count_rows(Some(pred.clone())).await? > 0 {
-                    ds.delete(pred).await?;
+                if ds.count(Some(pred.clone())).await? > 0 {
+                    ds.rewrite_where(pred.clone()).await?;
                 }
             }
-            t.runs
-                .delete(&format!(
-                    "{pred} AND (fields IS NULL OR fields <> {})",
-                    fields::DELETED
-                ))
-                .await?;
+            t.runs.rewrite_where(not_tombstone(pred.clone())).await?;
         }
         // Tags on versions that may still hold deleted data. Runs, params, series and records
         // are checked by run id; tracking never tags metrics, so a tag there counts as holding.
@@ -2562,8 +2324,11 @@ impl Core {
             .into_iter()
             .chain(recs.iter_mut().map(|(_, d)| d))
         {
-            report.fragments_rewritten += storage::lance::rewrite_deleted(ds).await?;
-            let (v, b) = storage::lance::remove_old_versions(ds).await?;
+            report.fragments_rewritten += ds.compact_removed().await?;
+            // Every version but the latest and tagged ones.
+            let (v, b) = ds
+                .cleanup(chrono::Utc::now() + chrono::Duration::seconds(1))
+                .await?;
             report.versions_removed += v;
             report.bytes_removed += b;
         }
@@ -2574,12 +2339,12 @@ impl Core {
     /// delete (a writer racing it). After `mark_ttl` no write-ahead log can be replayed
     /// without `replay_stale_wal`, so nothing can bring those runs back.
     async fn expire_tombstones(&self, t: &mut Tables) -> Result<()> {
-        latest(&mut t.runs).await?;
+        t.runs.latest().await?;
         let cutoff = now_nanos().saturating_sub(self.opts.mark_ttl.as_nanos() as u64);
         let old: Vec<String> = read_runs(
             &scan(
                 &t.runs,
-                Some(&format!("fields = {} AND seq < {cutoff}", fields::DELETED)),
+                Some(Pred::eq("fields", fields::DELETED).and(Pred::lt("seq", cutoff))),
             )
             .await?,
         )?
@@ -2589,12 +2354,11 @@ impl Core {
         if old.is_empty() {
             return Ok(());
         }
-        let list = old.iter().map(|r| quote(r)).collect::<Vec<_>>().join(", ");
-        let pred = format!("run_id IN ({list})");
+        let pred = Pred::is_in("run_id", &old);
         // The series first: the sorted rewrite then drops their points.
         for ds in [&mut t.series, &mut t.params, &mut t.runs] {
-            latest(ds).await?;
-            ds.delete(&pred).await?;
+            ds.latest().await?;
+            ds.rewrite_where(pred.clone()).await?;
         }
         let mut dead = self.deleted.lock();
         for r in &old {
@@ -2609,19 +2373,19 @@ impl Core {
         let t = &mut *t;
         prune_marks(t, self.opts.mark_ttl).await?;
         self.expire_tombstones(t).await?;
-        latest(&mut t.runs).await?;
-        fold_runs(&mut t.runs, &self.opts.storage_options).await?;
+        t.runs.latest().await?;
+        fold_runs(&mut t.runs).await?;
         for ds in [&mut t.runs, &mut t.params, &mut t.series] {
-            latest(ds).await?;
-            compact_files(ds, CompactionOptions::default(), None).await?;
+            ds.latest().await?;
+            ds.merge_small(None).await?;
         }
         // Points sorted by (series, step), the shape every read has, with overwritten steps
         // dropped, points of deleted series dropped, and each series' statistics replaced by
-        // one exact delta; this rewrite also merges the small fragments. The series are read
-        // after the points' version: a series is always committed before its points.
-        latest(&mut t.metrics).await?;
+        // one exact delta; this rewrite also merges the small files. The series are read after
+        // the points' version: a series is always committed before its points.
+        t.metrics.latest().await?;
         let dead = self.tombstones(&mut t.runs, true).await?;
-        latest(&mut t.series).await?;
+        t.series.latest().await?;
         let live: HashSet<u64> = read_series_rows(&scan(&t.series, None).await?)?
             .into_iter()
             .filter(|s| !dead.contains(&s.run_id))
@@ -2629,41 +2393,18 @@ impl Core {
             .collect();
         // Records tables: drop superseded rows, then index item and run ids.
         for (name, mut ds) in self.all_record_ds().await? {
-            let before = ds.version().version;
-            records::fold(&mut ds, &self.opts.storage_options).await?;
-            records::index(&mut ds).await?;
-            if ds.version().version != before {
+            let before = ds.version();
+            records::fold(&mut ds).await?;
+            ds.index(&["item_id", "run_id"]).await?;
+            if ds.version() != before {
                 self.keep_record_ds(&name, ds).await;
             }
         }
-        if !sort_metrics(&mut t.metrics, &self.opts.storage_options, Arc::new(live)).await? {
+        if !sort_metrics(&mut t.metrics, Arc::new(live)).await? {
             return Ok(()); // nothing new: no rewrite, no index work
         }
-        if t.metrics.count_rows(None).await? > 0 {
-            let has_index = t
-                .metrics
-                .load_indices()
-                .await?
-                .iter()
-                .any(|i| i.name == "series_id_idx");
-            if has_index {
-                // Indexes only the new fragments.
-                t.metrics
-                    .optimize_indices(&lance_index::optimize::OptimizeOptions::default())
-                    .await?;
-            } else {
-                t.metrics
-                    .create_index(
-                        &["series_id"],
-                        IndexType::BTree,
-                        Some("series_id_idx".into()),
-                        &ScalarIndexParams::for_builtin(BuiltinIndexType::BTree),
-                        true,
-                    )
-                    .await?;
-            }
-        }
-        Ok(())
+        // Indexes only the new files when the index exists.
+        t.metrics.index(&["series_id"]).await
     }
 }
 
@@ -2977,10 +2718,10 @@ impl Repo {
                 ]
             };
             Ok::<_, Error>((
-                t[0].latest_version_id().await?,
-                t[1].latest_version_id().await?,
-                t[2].latest_version_id().await?,
-                t[3].latest_version_id().await?,
+                t[0].latest_version().await?,
+                t[1].latest_version().await?,
+                t[2].latest_version().await?,
+                t[3].latest_version().await?,
             ))
         })
         .await
@@ -3098,7 +2839,7 @@ impl Repo {
     /// The latest committed version of records table `table`.
     pub async fn records_version(&self, table: &str) -> Result<u64> {
         let (core, table) = (self.core(), table.to_string());
-        rt::spawn(async move { Ok(core.existing_record_ds(&table).await?.version().version) }).await
+        rt::spawn(async move { Ok(core.existing_record_ds(&table).await?.version()) }).await
     }
 
     /// Names a version of records table `table` (the latest when `None`), so it can be read
@@ -3107,8 +2848,8 @@ impl Repo {
         let (core, table, tag) = (self.core(), table.to_string(), tag.to_string());
         rt::spawn(async move {
             let ds = core.existing_record_ds(&table).await?;
-            let v = version.unwrap_or(ds.version().version);
-            storage::tag_version(&ds, &tag, v).await
+            let v = version.unwrap_or(ds.version());
+            ds.create_tag(&tag, v).await
         })
         .await
     }
@@ -3120,13 +2861,7 @@ impl Repo {
             let Some(ds) = core.record_ds(&table, false).await? else {
                 return Ok(Vec::new());
             };
-            let mut out: Vec<(String, u64)> = ds
-                .tags()
-                .list()
-                .await?
-                .into_iter()
-                .map(|(name, c)| (name, c.version))
-                .collect();
+            let mut out = ds.tags().await?;
             out.sort();
             Ok(out)
         })
@@ -3139,7 +2874,7 @@ impl Repo {
         let (core, table, tag) = (self.core(), table.to_string(), tag.to_string());
         rt::spawn(async move {
             let ds = core.existing_record_ds(&table).await?;
-            Ok(ds.tags().delete(&tag).await?)
+            ds.delete_tag(&tag).await
         })
         .await
     }
@@ -3212,15 +2947,9 @@ impl Repo {
                 .into_iter()
                 .chain(recs.iter_mut().map(|(_, d)| d))
             {
-                latest(ds).await?;
+                ds.latest().await?;
                 // Tagged versions are kept, and do not stop the cleanup of others.
-                let policy = lance::dataset::cleanup::CleanupPolicyBuilder::default()
-                    .before_timestamp(cutoff)
-                    .error_if_tagged_old_versions(false)
-                    .build();
-                removed += lance::dataset::cleanup::cleanup_old_versions(ds, policy)
-                    .await?
-                    .bytes_removed;
+                removed += ds.cleanup(cutoff).await?.1;
             }
             Ok(removed)
         })
@@ -3235,10 +2964,8 @@ impl Repo {
         rt::spawn(async move {
             core.flush().await?;
             let mut t = core.tables.lock().await;
-            latest(&mut t.metrics).await?;
-            Ok(t.metrics
-                .count_rows(Some("stats IS NULL".to_string()))
-                .await?)
+            t.metrics.latest().await?;
+            t.metrics.count(Some(Pred::IsNull("stats"))).await
         })
         .await
     }
@@ -3249,10 +2976,10 @@ impl Repo {
         rt::spawn(async move {
             let t = core.tables.lock().await;
             (
-                t.runs.version().version,
-                t.params.version().version,
-                t.series.version().version,
-                t.metrics.version().version,
+                t.runs.version(),
+                t.params.version(),
+                t.series.version(),
+                t.metrics.version(),
             )
         })
         .await

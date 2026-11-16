@@ -15,14 +15,13 @@ use std::sync::{Arc, LazyLock};
 
 use arrow_array::{Array, RecordBatch, StringArray, TimestampMicrosecondArray, UInt64Array};
 use arrow_schema::{DataType, Field, Schema, SchemaRef, TimeUnit};
-use futures::TryStreamExt;
-use lance::dataset::{Dataset, InsertBuilder, WriteMode};
-use lance::index::DatasetIndexExt;
-use lance_index::scalar::{BuiltinIndexType, ScalarIndexParams};
-use lance_index::IndexType;
+use futures::{StreamExt, TryStreamExt};
 use serde_json::Value;
 
 use crate::error::{Error, Result};
+use crate::storage::oplog::FileId;
+use crate::storage::pred::Pred;
+use crate::storage::table::{Scan, TableRef};
 use crate::storage::{self, StorageOptions};
 pub static RECORDS: LazyLock<SchemaRef> = LazyLock::new(|| {
     Arc::new(Schema::new(vec![
@@ -86,10 +85,6 @@ pub struct RecordQuery {
 
 /// Run ids per `IN` list, so a long list does not make one huge filter.
 const RUN_IDS_PER_QUERY: usize = 500;
-
-pub(crate) fn quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "''"))
-}
 
 /// The directory name of a table's dataset: letters, digits, `-` and `_` (and `.` after the
 /// first byte) as they are, every other byte as `=XX`. Only characters object stores never
@@ -223,16 +218,17 @@ pub(crate) async fn read_legacy(
     opts: &StorageOptions,
     table: Option<&str>,
 ) -> Result<Vec<Record>> {
-    let ds = match storage::open(&storage::join(root, LEGACY), opts, None).await {
+    let uri = storage::join(root, LEGACY);
+    let ds = match storage::table::open(&uri, opts, RECORDS.clone(), false, None).await {
         Ok(ds) => ds,
         Err(Error::NotFound(_)) => return Ok(Vec::new()),
         Err(e) => return Err(e),
     };
-    let mut s = ds.scan();
-    if let Some(t) = table {
-        s.filter(&format!("table_name = {}", quote(t)))?;
-    }
-    let batches: Vec<RecordBatch> = s.try_into_stream().await?.try_collect().await?;
+    let scan = Scan {
+        filter: table.map(|t| Pred::eq("table_name", t)),
+        ..Scan::all()
+    };
+    let batches = ds.scan(scan).await?;
     let mut out = Vec::new();
     for b in &batches {
         let (seq, tbl, run, item, data, at) = arrays(b)?;
@@ -255,7 +251,7 @@ pub(crate) async fn read_legacy(
 /// Deletes the legacy dataset. Returns whether there was one.
 pub(crate) async fn drop_legacy(root: &str, opts: &StorageOptions) -> Result<bool> {
     let uri = storage::join(root, LEGACY);
-    match storage::open(&uri, opts, None).await {
+    match storage::table::open(&uri, opts, RECORDS.clone(), false, None).await {
         Ok(_) => {}
         Err(Error::NotFound(_)) => return Ok(false),
         Err(e) => return Err(e),
@@ -270,13 +266,13 @@ pub(crate) async fn open(
     opts: &StorageOptions,
     create: bool,
     retention: Option<std::time::Duration>,
-) -> Result<Dataset> {
+) -> Result<TableRef> {
     if table.is_empty() {
         return Err(Error::InvalidArgument(
             "a records table needs a name".into(),
         ));
     }
-    storage::open_or_create(
+    storage::table::open(
         &storage::join(root, &format!("{DIR}/{}.lance", encode(table))),
         opts,
         RECORDS.clone(),
@@ -323,14 +319,9 @@ pub(crate) fn batch(
     )?)
 }
 
-pub(crate) async fn append(ds: &mut Dataset, b: RecordBatch, opts: &StorageOptions) -> Result<u64> {
-    let params = storage::write_params(opts, WriteMode::Append);
-    let new = InsertBuilder::new(Arc::new(ds.clone()))
-        .with_params(&params)
-        .execute(vec![b])
-        .await?;
-    *ds = new;
-    Ok(ds.version().version)
+pub(crate) async fn append(ds: &mut TableRef, b: RecordBatch) -> Result<u64> {
+    ds.append(vec![b]).await?;
+    Ok(ds.version())
 }
 
 fn arrays(b: &RecordBatch) -> Result<Cols<'_>> {
@@ -371,35 +362,34 @@ fn key(run: &StringArray, item: &StringArray, i: usize) -> (Option<String>, Stri
 }
 
 /// Reads a table from `ds` (already at the version wanted): the newest row per key.
-pub(crate) async fn read(ds: &Dataset, q: &RecordQuery) -> Result<Vec<Record>> {
+pub(crate) async fn read(ds: &TableRef, q: &RecordQuery) -> Result<Vec<Record>> {
     let mut filter = Vec::new();
     if let Some(r) = &q.run_id {
-        filter.push(format!("run_id = {}", quote(r)));
+        filter.push(Pred::eq("run_id", r));
     }
     if let Some(i) = &q.item_id {
-        filter.push(format!("item_id = {}", quote(i)));
+        filter.push(Pred::eq("item_id", i));
     }
     // One scan, or one per batch of run ids; keys include the run id, so batches never share
     // a key and newest-wins per key holds across them.
-    let filters: Vec<Vec<String>> = match &q.run_ids {
+    let filters: Vec<Vec<Pred>> = match &q.run_ids {
         None => vec![filter],
         Some(ids) => ids
             .chunks(RUN_IDS_PER_QUERY)
             .map(|c| {
                 let mut f = filter.clone();
-                let list = c.iter().map(|r| quote(r)).collect::<Vec<_>>().join(", ");
-                f.push(format!("run_id IN ({list})"));
+                f.push(Pred::is_in("run_id", c));
                 f
             })
             .collect(),
     };
     let mut batches: Vec<RecordBatch> = Vec::new();
     for f in filters {
-        let mut s = ds.scan();
-        if !f.is_empty() {
-            s.filter(&f.join(" AND "))?;
-        }
-        batches.extend(s.try_into_stream().await?.try_collect::<Vec<_>>().await?);
+        let scan = Scan {
+            filter: (!f.is_empty()).then_some(Pred::And(f)),
+            ..Scan::all()
+        };
+        batches.extend(ds.scan(scan).await?);
     }
     let mut newest: HashMap<(Option<String>, String), Record> = HashMap::new();
     for b in &batches {
@@ -430,18 +420,14 @@ pub(crate) async fn read(ds: &Dataset, q: &RecordQuery) -> Result<Vec<Record>> {
 
 /// Rewrites `ds` without superseded rows, in one commit that keeps appends committed
 /// meanwhile. Returns the rows dropped (0 without a commit when there are none).
-pub(crate) async fn fold(ds: &mut Dataset, opts: &StorageOptions) -> Result<usize> {
-    use lance::dataset::transaction::{Operation, TransactionBuilder, UpdateMode};
-    use lance::deps::datafusion::physical_plan::stream::RecordBatchStreamAdapter;
-    use lance::deps::datafusion::physical_plan::SendableRecordBatchStream;
-
+pub(crate) async fn fold(ds: &mut TableRef) -> Result<usize> {
     // The newest sequence number per key.
     let mut newest: HashMap<(Option<String>, String), u64> = HashMap::new();
     let mut rows = 0usize;
     {
-        let mut s = ds.scan();
-        s.project(&["seq", "run_id", "item_id"])?;
-        let mut st = s.try_into_stream().await?;
+        let mut st = ds
+            .scan_stream(Scan::all().columns(&["seq", "run_id", "item_id"]))
+            .await?;
         while let Some(b) = st.try_next().await? {
             let seq = b
                 .column_by_name("seq")
@@ -466,12 +452,10 @@ pub(crate) async fn fold(ds: &mut Dataset, opts: &StorageOptions) -> Result<usiz
     if dropped == 0 {
         return Ok(0);
     }
-    let removed: Vec<u64> = ds.fragments().iter().map(|f| f.id).collect();
+    let files: Vec<FileId> = ds.files().into_iter().map(|f| f.id).collect();
     let newest = Arc::new(newest);
-    let mut s = ds.scan();
-    s.with_fragments(ds.fragments().to_vec());
-    let stream = s
-        .try_into_stream()
+    let stream = ds
+        .scan_stream(Scan::all().files(files.clone()))
         .await?
         .map_ok(move |b| {
             let keep: arrow_array::BooleanArray = match arrays(&b) {
@@ -482,72 +466,9 @@ pub(crate) async fn fold(ds: &mut Dataset, opts: &StorageOptions) -> Result<usiz
             };
             arrow_select::filter::filter_record_batch(&b, &keep).unwrap_or(b)
         })
-        .map_err(|e| lance::deps::datafusion::error::DataFusionError::External(Box::new(e)));
-    let source: SendableRecordBatchStream =
-        Box::pin(RecordBatchStreamAdapter::new(RECORDS.clone(), stream));
-    let params = storage::write_params(opts, WriteMode::Append);
-    let base = Arc::new(ds.clone());
-    let txn = InsertBuilder::new(base.clone())
-        .with_params(&params)
-        .execute_uncommitted_stream(source)
-        .await?;
-    let new_fragments = match txn.operation {
-        Operation::Append { fragments } => fragments,
-        other => {
-            return Err(Error::Storage(
-                format!("unexpected uncommitted operation {other:?}").into(),
-            ))
-        }
-    };
-    let op = Operation::Update {
-        removed_fragment_ids: removed,
-        updated_fragments: Vec::new(),
-        new_fragments,
-        fields_modified: Vec::new(),
-        compacted_sstables: Vec::new(),
-        fields_for_preserving_frag_bitmap: Vec::new(),
-        update_mode: Some(UpdateMode::RewriteRows),
-        inserted_rows_filter: None,
-        updated_fragment_offsets: None,
-    };
-    let txn = TransactionBuilder::new(base.version().version, op).build();
-    *ds = lance::dataset::CommitBuilder::new(base)
-        .execute(txn)
-        .await?;
+        .boxed();
+    ds.replace(files, RECORDS.clone(), stream, None).await?;
     Ok(dropped)
-}
-
-/// Builds the B-tree indices on `item_id` and `run_id`, or adds new fragments to them.
-pub(crate) async fn index(ds: &mut Dataset) -> Result<()> {
-    if ds.count_rows(None).await? == 0 {
-        return Ok(());
-    }
-    let have: Vec<String> = ds
-        .load_indices()
-        .await?
-        .iter()
-        .map(|i| i.name.clone())
-        .collect();
-    let mut missing = false;
-    for c in ["item_id", "run_id"] {
-        let name = format!("{c}_idx");
-        if !have.contains(&name) {
-            missing = true;
-            ds.create_index(
-                &[c],
-                IndexType::BTree,
-                Some(name),
-                &ScalarIndexParams::for_builtin(BuiltinIndexType::BTree),
-                true,
-            )
-            .await?;
-        }
-    }
-    if !missing {
-        ds.optimize_indices(&lance_index::optimize::OptimizeOptions::default())
-            .await?;
-    }
-    Ok(())
 }
 
 #[cfg(test)]

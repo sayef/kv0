@@ -6,7 +6,9 @@ A short tour of the code. [Design](design.md) explains the decisions and guarant
 crates/kv0            the library
   src/storage/mod.rs       locations and storage options
   src/storage/oplog.rs     OpLog: the key-value layer's storage interface
-  src/storage/lance/       the Lance engine: datasets, versions, tags, cleanup; kv.rs the OpLog
+  src/storage/table.rs     Table: the tracking layer's storage interface (versioned tables)
+  src/storage/pred.rs      Pred: typed row filters for Table scans and deletes
+  src/storage/lance/       the Lance engine: kv.rs the OpLog, table.rs the Table
   src/rt.rs                the Tokio runtime behind the blocking APIs
   src/background.rs        one thread that flushes every open handle on its interval
   src/clock.rs             sequence numbers (a hybrid logical clock)
