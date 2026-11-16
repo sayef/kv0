@@ -44,8 +44,8 @@ uv run mkdocs build --strict      # what CI runs: no warnings allowed
 ## Project layout
 
 - `crates/kv0`: the library. `src/kv` is the key-value layer (`view.rs` the in-memory ordered view,
-  `store.rs` the Lance operation log), `src/tracking` the tracking tables, `src/storage.rs` locations and
-  object-store options, `src/rt.rs` the Tokio runtime behind the blocking APIs.
+  `store.rs` reading the operation log), `src/tracking` the tracking tables, `src/storage` locations,
+  object-store options and the storage engines (`oplog.rs` the interface, `lance/` the Lance engine), `src/rt.rs` the Tokio runtime behind the blocking APIs.
 - `crates/kv0-py`: the Python bindings (PyO3), the pure-Python package in `python/kv0`, typed stubs
   and the Python tests.
 - `bench/`: the evaluation harness (`bench/eval/`), the key-value comparison with the SQLite-cache

@@ -4,13 +4,15 @@ A short tour of the code. [Design](design.md) explains the decisions and guarant
 
 ```
 crates/kv0            the library
-  src/storage.rs           locations, storage options, open-or-create a Lance dataset
+  src/storage/mod.rs       locations and storage options
+  src/storage/oplog.rs     OpLog: the key-value layer's storage interface
+  src/storage/lance/       the Lance engine: datasets, versions, tags, cleanup; kv.rs the OpLog
   src/rt.rs                the Tokio runtime behind the blocking APIs
   src/background.rs        one thread that flushes every open handle on its interval
   src/clock.rs             sequence numbers (a hybrid logical clock)
   src/kv/view.rs           the in-memory ordered view: newest-wins application of operations
   src/kv/wal.rs            the local write-ahead log: segments, records, replay of crashed writers
-  src/kv/store.rs          the Lance operation log: read fragments, append, replace (compaction)
+  src/kv/store.rs          reading the operation log into the view; what a newer version adds
   src/kv/mod.rs            Db, Options, WriteBatch, DbIterator: buffering, flush, refresh, compaction
   src/tracking/schema.rs   Arrow schemas of runs, params, series and metrics
   src/tracking/mod.rs      Repo and Run: buffers, flush, queries, optimize
