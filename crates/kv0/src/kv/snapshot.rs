@@ -1,43 +1,27 @@
 //! A local snapshot of a key-value view, so a reopen loads it instead of rescanning Lance.
 //!
 //! Stored next to the dataset's WAL directories (`<wal root>/<xxh3 of the URI>/view.snap`):
-//! `KV0VIEW2`, the dataset version, each fragment's identity, the view (see
-//! [`View::write_to`]), then the xxh3-64 of everything before it. A snapshot is used only when
-//! every fragment it covers is still in the dataset unchanged: compaction (which may drop
-//! tombstones) or a recreated dataset invalidates it, and the open falls back to a full scan.
-//! Fragments committed since are read and applied as usual.
+//! `KV0VIEW2`, the log version, each file's id and identity ([`crate::storage::oplog::LogFile`]),
+//! the view (see [`View::write_to`]), then the xxh3-64 of everything before it. A snapshot is
+//! used only when every file it covers is still in the log unchanged: compaction (which may drop
+//! tombstones) or a recreated log invalidates it, and the open falls back to a full scan. Files
+//! committed since are read and applied as usual.
+//!
+//! Version 2 stores file ids as `u64` (Lance fragment ids).
 
 use std::fs;
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
-use lance::dataset::Dataset;
 use xxhash_rust::xxh3::Xxh3;
 
 use super::view::View;
+use crate::storage::oplog::{FileId, OpLog};
 
 const MAGIC: &[u8; 8] = b"KV0VIEW2";
 
 pub(crate) fn path(root: &Path, uri: &str) -> PathBuf {
     super::wal::dataset_dir(root, uri).join("view.snap")
-}
-
-/// Each fragment's id and identity (first data file, which Lance names uniquely, row count and
-/// whether it has deletions).
-pub(crate) fn fragments(ds: &Dataset) -> Vec<(u64, String)> {
-    ds.fragments()
-        .iter()
-        .map(|f| {
-            let file = f.files.first().map_or("", |d| d.path.as_str());
-            let rows = f.physical_rows.unwrap_or(0);
-            // Which deletion file, not only whether there is one: more deletions write a new one.
-            let del = f
-                .deletion_file
-                .as_ref()
-                .map_or(String::new(), |d| format!("{}.{}", d.id, d.read_version));
-            (f.id, format!("{file}|{rows}|{del}"))
-        })
-        .collect()
 }
 
 struct Hashing<T> {
@@ -73,7 +57,7 @@ fn bad(m: &str) -> io::Error {
 pub(crate) fn write(
     path: &Path,
     version: u64,
-    frags: &[(u64, String)],
+    frags: &[(FileId, String)],
     view: &View,
 ) -> io::Result<()> {
     let dir = path.parent().ok_or_else(|| bad("no snapshot directory"))?;
@@ -94,6 +78,7 @@ pub(crate) fn write(
         w.write_all(&version.to_le_bytes())?;
         w.write_all(&(frags.len() as u64).to_le_bytes())?;
         for (id, ident) in frags {
+            let id: u64 = id.0.parse().map_err(|_| bad("file id is not numeric"))?;
             w.write_all(&id.to_le_bytes())?;
             w.write_all(&(ident.len() as u32).to_le_bytes())?;
             w.write_all(ident.as_bytes())?;
@@ -141,7 +126,7 @@ fn remove_abandoned(dir: &Path) {
 
 pub(crate) struct Loaded {
     pub version: u64,
-    pub frags: Vec<(u64, String)>,
+    pub frags: Vec<(FileId, String)>,
     pub view: View,
 }
 
@@ -179,7 +164,7 @@ pub(crate) fn read(path: &Path) -> io::Result<Option<Loaded>> {
         let mut s = vec![0u8; len];
         r.read_exact(&mut s)?;
         frags.push((
-            id,
+            FileId(id.to_string()),
             String::from_utf8(s).map_err(|_| bad("fragment identity"))?,
         ));
     }
@@ -197,11 +182,12 @@ pub(crate) fn read(path: &Path) -> io::Result<Option<Loaded>> {
     }))
 }
 
-/// Whether a snapshot still describes `ds`: every fragment it covers is present and unchanged.
-pub(crate) fn still_valid(l: &Loaded, ds: &Dataset) -> bool {
-    if ds.version().version < l.version {
+/// Whether a snapshot still describes `log`: every file it covers is present and unchanged.
+pub(crate) fn still_valid(l: &Loaded, log: &dyn OpLog) -> bool {
+    if log.version() < l.version {
         return false;
     }
-    let now: std::collections::HashMap<u64, String> = fragments(ds).into_iter().collect();
+    let now: std::collections::HashMap<FileId, String> =
+        log.files().into_iter().map(|f| (f.id, f.ident)).collect();
     l.frags.iter().all(|(id, ident)| now.get(id) == Some(ident))
 }

@@ -27,9 +27,6 @@ use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use lance::dataset::cleanup::CleanupPolicyBuilder;
-use lance::dataset::optimize::{compact_files, CompactionOptions};
-use lance::dataset::Dataset;
 use parking_lot::{Mutex, RwLock};
 
 use self::view::{Op, Val, View, OP_DELETE, OP_DELETE_RANGE, OP_PUT};
@@ -37,6 +34,7 @@ use crate::background::{self, Background};
 use crate::clock::{now_nanos, Clock};
 use crate::error::{Error, Result};
 use crate::rt;
+use crate::storage::oplog::{self, FileId, Log, WriterMark};
 use crate::storage::{self, StorageOptions};
 
 /// Options for [`Db::open`].
@@ -202,8 +200,8 @@ pub struct Stats {
 
 struct State {
     view: View,
-    /// The dataset version the view's row addresses refer to.
-    reader: Dataset,
+    /// The log version the view's row addresses refer to.
+    reader: Log,
     pending: Vec<Op>,
     pending_bytes: usize,
     clock: Clock,
@@ -212,9 +210,9 @@ struct State {
 }
 
 struct Persist {
-    dataset: Dataset,
-    /// Fragments whose rows are in the view.
-    applied: HashSet<u64>,
+    log: Log,
+    /// Files whose rows are in the view.
+    applied: HashSet<FileId>,
 }
 
 struct Inner {
@@ -222,7 +220,7 @@ struct Inner {
     opts: Options,
     read_only: bool,
     closed: AtomicBool,
-    /// The version, fragment count and stored rows of `persist.dataset`, readable without
+    /// The version, file count and stored rows of `persist.log`, readable without
     /// taking `persist` (which a flush holds across a commit).
     version: AtomicU64,
     fragments: AtomicU64,
@@ -300,57 +298,55 @@ impl Db {
                 None
             }
         });
-        let (dataset, mut view, snapshot_version) = {
+        let (stored, mut view, snapshot_version) = {
             let uri = uri.clone();
             let o = opts.clone();
             rt::block_on(async move {
-                let ds = match o.version {
-                    Some(v) => storage::open(&uri, &o.storage_options, Some(v)).await?,
-                    None => {
-                        storage::open_or_create(
-                            &uri,
-                            &o.storage_options,
-                            store::SCHEMA.clone(),
-                            o.create_if_missing && !o.read_only,
-                            o.version_retention,
-                        )
-                        .await?
-                    }
-                };
+                let log = oplog::open(
+                    &uri,
+                    &o.storage_options,
+                    o.version,
+                    o.create_if_missing && !o.read_only,
+                    o.version_retention,
+                )
+                .await?;
                 match loaded {
                     Some(l)
                         if l.view.lazy_threshold == o.lazy_value_threshold
-                            && snapshot::still_valid(&l, &ds) =>
+                            && snapshot::still_valid(&l, log.as_ref()) =>
                     {
-                        // Start from the snapshot; read only fragments committed since.
-                        let known: HashSet<u64> = l.frags.iter().map(|f| f.0).collect();
-                        let newer: HashSet<u64> = store::fragment_ids(&ds)
+                        // Start from the snapshot; read only files committed since.
+                        let known: HashSet<FileId> = l.frags.iter().map(|f| f.0.clone()).collect();
+                        let newer: HashSet<FileId> = store::file_ids(log.as_ref())
                             .difference(&known)
-                            .copied()
+                            .cloned()
                             .collect();
                         let mut view = l.view;
                         if !newer.is_empty() {
-                            for row in
-                                store::read_fragments(&ds, Some(&newer), o.lazy_value_threshold)
-                                    .await?
+                            for row in store::read_files(
+                                log.as_ref(),
+                                Some(&newer),
+                                o.lazy_value_threshold,
+                            )
+                            .await?
                             {
                                 view.apply_row(row);
                             }
                         }
-                        Ok::<_, Error>((ds, view, Some(l.version)))
+                        Ok::<_, Error>((log, view, Some(l.version)))
                     }
                     _ => {
                         let mut view = View::default();
                         view.lazy_threshold = o.lazy_value_threshold;
-                        store::load_into(&ds, &mut view).await?;
-                        Ok::<_, Error>((ds, view, None))
+                        store::load_into(log.as_ref(), &mut view).await?;
+                        Ok::<_, Error>((log, view, None))
                     }
                 }
             })?
         };
         let mut clock = Clock::default();
         clock.observe(view.max_seq);
-        let applied = store::fragment_ids(&dataset);
+        let applied = store::file_ids(stored.as_ref());
 
         // Claim WALs of writers that are no longer running and replay what they did not commit.
         let use_wal = !read_only && opts.wal && !uri.starts_with("memory://");
@@ -408,17 +404,20 @@ impl Db {
             closed: AtomicBool::new(false),
             state: RwLock::new(State {
                 view,
-                reader: dataset.clone(),
+                reader: stored.clone(),
                 pending,
                 pending_bytes,
                 clock,
                 last_flush: now,
                 last_refresh: now,
             }),
-            version: AtomicU64::new(dataset.version().version),
-            fragments: AtomicU64::new(dataset.fragments().len() as u64),
-            stored_rows: AtomicU64::new(store::physical_rows(&dataset) as u64),
-            persist: Mutex::new(Persist { dataset, applied }),
+            version: AtomicU64::new(stored.version()),
+            fragments: AtomicU64::new(stored.files().len() as u64),
+            stored_rows: AtomicU64::new(store::physical_rows(stored.as_ref()) as u64),
+            persist: Mutex::new(Persist {
+                log: stored,
+                applied,
+            }),
             wal: Mutex::new(log),
             abandoned: AtomicBool::new(false),
             flushing: AtomicBool::new(false),
@@ -648,15 +647,8 @@ impl Db {
 
     /// Every version still stored, oldest first.
     pub fn versions(&self) -> Result<Vec<VersionInfo>> {
-        let ds = self.inner.persist.lock().dataset.clone();
-        let versions = rt::block_on(async move { ds.versions().await })?;
-        Ok(versions
-            .into_iter()
-            .map(|v| VersionInfo {
-                version: v.version,
-                timestamp_micros: v.timestamp.timestamp_micros(),
-            })
-            .collect())
+        let log = self.inner.persist.lock().log.clone();
+        rt::block_on(async move { log.versions().await })
     }
 
     /// Deletes versions (and the files only they use) older than `older_than`. The latest
@@ -671,19 +663,12 @@ impl Db {
         if self.inner.read_only {
             return Err(Error::NotSupported("the database is open read-only".into()));
         }
-        let ds = self.inner.persist.lock().dataset.clone();
+        let log = self.inner.persist.lock().log.clone();
         let cutoff = chrono::Utc::now()
             - chrono::Duration::from_std(older_than)
                 .map_err(|e| Error::InvalidArgument(e.to_string()))?;
-        let stats = rt::block_on(async move {
-            // Tagged versions are kept, and do not stop the cleanup of others.
-            let policy = CleanupPolicyBuilder::default()
-                .before_timestamp(cutoff)
-                .error_if_tagged_old_versions(false)
-                .build();
-            lance::dataset::cleanup::cleanup_old_versions(&ds, policy).await
-        })?;
-        Ok(stats.bytes_removed)
+        let (_, bytes) = rt::block_on(async move { log.cleanup(cutoff).await })?;
+        Ok(bytes)
     }
 
     /// Physically removes deleted and overwritten data: rewrites the dataset as the live view
@@ -694,25 +679,16 @@ impl Db {
     /// with `force` such tags are deleted.
     /// Other handles holding older versions refresh when a read finds their files gone.
     pub fn purge(&self, force: bool) -> Result<crate::PurgeReport> {
-        use crate::purge;
         self.inner.check_open()?;
         if self.inner.read_only {
             return Err(Error::NotSupported("the database is open read-only".into()));
         }
-        let before: std::collections::HashSet<u64> = self
-            .inner
-            .persist
-            .lock()
-            .dataset
-            .fragments()
-            .iter()
-            .map(|f| f.id)
-            .collect();
+        let before = store::file_ids(self.inner.persist.lock().log.as_ref());
         // Flushed first, so the tag check compares against everything written.
         self.inner.flush()?;
-        let ds = self.inner.persist.lock().dataset.clone();
+        let log = self.inner.persist.lock().log.clone();
         let mut report = crate::PurgeReport::default();
-        let pinned = self.pinned_tags(&ds)?;
+        let pinned = self.pinned_tags(&log)?;
         if !pinned.is_empty() {
             if !force {
                 let names = pinned
@@ -725,29 +701,32 @@ impl Db {
                 )));
             }
             for (tag, _) in &pinned {
-                let (ds, tag2) = (ds.clone(), tag.clone());
-                rt::block_on(async move { ds.tags().delete(&tag2).await })?;
+                let (log, tag2) = (log.clone(), tag.clone());
+                rt::block_on(async move { log.delete_tag(&tag2).await })?;
                 report.tags_deleted.push(tag.clone());
             }
         }
         // Only now change anything: a refused purge leaves the database as it was.
         self.compact()?;
-        let ds = self.inner.persist.lock().dataset.clone();
-        report.fragments_rewritten = before
-            .iter()
-            .filter(|id| !ds.fragments().iter().any(|f| f.id == **id))
-            .count();
-        let (v, b) = {
-            let ds = ds.clone();
-            rt::block_on(async move { purge::remove_old_versions(&ds).await })?
-        };
+        let log = self.inner.persist.lock().log.clone();
+        let now = store::file_ids(log.as_ref());
+        report.fragments_rewritten = before.iter().filter(|id| !now.contains(id)).count();
+        let (v, b) = rt::block_on(async move {
+            // Every version but the latest and tagged ones.
+            log.cleanup(chrono::Utc::now() + chrono::Duration::seconds(1))
+                .await
+        })?;
         report.versions_removed = v;
         report.bytes_removed = b;
         // A write that overwrote a tagged key while this ran leaves a tag holding data purge
         // would remove; say so rather than report a complete erasure.
         self.inner.refresh(true)?;
-        let ds = self.inner.persist.lock().dataset.clone();
-        report.tags_left = self.pinned_tags(&ds)?.into_iter().map(|(t, _)| t).collect();
+        let log = self.inner.persist.lock().log.clone();
+        report.tags_left = self
+            .pinned_tags(&log)?
+            .into_iter()
+            .map(|(t, _)| t)
+            .collect();
         // This machine's view snapshot may hold values of keys deleted since it was saved.
         let root = self
             .inner
@@ -763,37 +742,23 @@ impl Db {
         Ok(report)
     }
 
-    /// Tags of `ds` on older versions holding a put that is not the live entry now (a deleted
+    /// Tags of `log` on older versions holding a put that is not the live entry now (a deleted
     /// key, or a value overwritten since), with their versions.
-    fn pinned_tags(&self, ds: &Dataset) -> Result<Vec<(String, u64)>> {
-        let tags = {
-            let ds = ds.clone();
-            rt::block_on(async move { crate::purge::old_tags(&ds).await })?
+    fn pinned_tags(&self, log: &Log) -> Result<Vec<(String, u64)>> {
+        let current = log.version();
+        let mut tags: Vec<(String, u64)> = {
+            let log = log.clone();
+            rt::block_on(async move { log.tags().await })?
         };
+        tags.retain(|(_, v)| *v < current);
+        tags.sort();
         let mut pinned = Vec::new();
         for (tag, v) in tags {
-            let ds = ds.clone();
+            let log = log.clone();
             let puts: Vec<(Bytes, u64)> = rt::block_on(async move {
-                let old = ds.checkout_version(v).await?;
-                let mut sc = old.scan();
-                sc.project(&["seq", "key", "op"])?;
-                sc.filter(&format!("op = {}", view::OP_PUT))?;
-                let mut out = Vec::new();
-                let mut st = sc.try_into_stream().await?;
-                while let Some(b) = futures::TryStreamExt::try_next(&mut st).await? {
-                    let k = b
-                        .column_by_name("key")
-                        .and_then(|c| c.as_any().downcast_ref::<arrow_array::BinaryArray>())
-                        .ok_or_else(|| Error::Corruption("key column".into()))?;
-                    let s = b
-                        .column_by_name("seq")
-                        .and_then(|c| c.as_any().downcast_ref::<arrow_array::UInt64Array>())
-                        .ok_or_else(|| Error::Corruption("seq column".into()))?;
-                    for i in 0..b.num_rows() {
-                        out.push((Bytes::copy_from_slice(k.value(i)), s.value(i)));
-                    }
-                }
-                Ok::<_, Error>(out)
+                let old = log.checkout(v).await?;
+                let all = store::addresses(old.as_ref(), &store::file_ids(old.as_ref())).await?;
+                Ok::<_, Error>(all.into_iter().map(|(k, s, _)| (k, s)).collect())
             })?;
             let st = self.inner.state.read();
             if puts.iter().any(|(k, s)| st.view.live_seq(k) != Some(*s)) {
@@ -807,38 +772,33 @@ impl Db {
     /// with `Options::version` (see [`Db::tag_version`]) and is kept by version cleanup.
     pub fn create_tag(&self, tag: &str, version: Option<u64>) -> Result<()> {
         self.inner.check_open()?;
-        let ds = self.inner.persist.lock().dataset.clone();
-        let v = version.unwrap_or(ds.version().version);
+        let log = self.inner.persist.lock().log.clone();
+        let v = version.unwrap_or(log.version());
         let tag = tag.to_string();
-        rt::block_on(async move { crate::storage::tag_version(&ds, &tag, v).await })
+        rt::block_on(async move { log.create_tag(&tag, v).await })
     }
 
     /// Tags and the versions they name, sorted by name.
     pub fn tags(&self) -> Result<Vec<(String, u64)>> {
-        let ds = self.inner.persist.lock().dataset.clone();
-        let mut out: Vec<(String, u64)> = rt::block_on(async move { ds.tags().list().await })?
-            .into_iter()
-            .map(|(name, c)| (name, c.version))
-            .collect();
+        let log = self.inner.persist.lock().log.clone();
+        let mut out: Vec<(String, u64)> = rt::block_on(async move { log.tags().await })?;
         out.sort();
         Ok(out)
     }
 
     /// The version a tag names.
     pub fn tag_version(&self, tag: &str) -> Result<u64> {
-        let ds = self.inner.persist.lock().dataset.clone();
+        let log = self.inner.persist.lock().log.clone();
         let tag = tag.to_string();
-        Ok(rt::block_on(
-            async move { ds.tags().get_version(&tag).await },
-        )?)
+        rt::block_on(async move { log.tag_version(&tag).await })
     }
 
     /// Removes a tag.
     pub fn delete_tag(&self, tag: &str) -> Result<()> {
         self.inner.check_open()?;
-        let ds = self.inner.persist.lock().dataset.clone();
+        let log = self.inner.persist.lock().log.clone();
         let tag = tag.to_string();
-        rt::block_on(async move { ds.tags().delete(&tag).await })?;
+        rt::block_on(async move { log.delete_tag(&tag).await })?;
         Ok(())
     }
 
@@ -883,13 +843,15 @@ impl Db {
 }
 
 impl Inner {
-    /// Makes `ds`'s version and sizes readable without the `persist` lock.
-    fn publish(&self, ds: &Dataset) {
-        self.fragments
-            .store(ds.fragments().len() as u64, Ordering::Release);
-        self.stored_rows
-            .store(store::physical_rows(ds) as u64, Ordering::Release);
-        self.version.store(ds.version().version, Ordering::Release);
+    /// Makes `log`'s version and sizes readable without the `persist` lock.
+    fn publish(&self, log: &Log) {
+        let files = log.files();
+        self.fragments.store(files.len() as u64, Ordering::Release);
+        self.stored_rows.store(
+            files.iter().map(|f| f.rows).sum::<usize>() as u64,
+            Ordering::Release,
+        );
+        self.version.store(log.version(), Ordering::Release);
     }
 
     fn check_open(&self) -> Result<()> {
@@ -923,10 +885,9 @@ impl Inner {
                 w.as_ref().map(|w| w.writer_id().to_string()),
             )
         };
-        let before = p.dataset.version().version;
-        let ds = p.dataset.clone();
+        let before = p.log.version();
+        let log = p.log.clone();
         let applied = p.applied.clone();
-        let o = self.opts.storage_options.clone();
         let own_mark = writer.as_ref().map(|w| {
             let max = ops.iter().map(|o| o.seq).max().unwrap_or(0);
             view::mark(Bytes::from(w.clone().into_bytes()), max)
@@ -940,7 +901,11 @@ impl Inner {
                     .iter()
                     .any(|o| o.kind == OP_PUT && o.value.as_ref().is_some_and(|v| v.len() > lazy));
             rt::block_on(async move {
-                let after = store::append(ds, ops, o, writer).await?;
+                let mark = writer.map(|writer| WriterMark {
+                    seq: ops.iter().map(|o| o.seq).max().unwrap_or(0),
+                    writer,
+                });
+                let after = log.append(ops, mark).await?;
                 let u = store::unseen(before, &after, &applied, true, lazy, relocate).await?;
                 Ok::<_, Error>((after, u))
             })
@@ -957,7 +922,7 @@ impl Inner {
                 }
                 self.publish(&after);
                 self.take_in(&mut self.state.write(), &after, u.rows, u.moved);
-                p.dataset = after;
+                p.log = after;
                 p.applied = u.ids;
                 // The writes are committed; a failed automatic compaction (for example one that
                 // lost a race with another writer's compaction) is retried after a later flush.
@@ -980,37 +945,31 @@ impl Inner {
 
     fn maybe_compact(&self, p: &mut Persist) -> Result<()> {
         let max = self.opts.max_fragments;
-        // Only fragments below Lance's compaction target can be merged, so only they count;
-        // otherwise a large settled dataset would trigger a compaction on every flush.
-        let target = CompactionOptions::default().target_rows_per_fragment;
-        let small = p
-            .dataset
-            .fragments()
-            .iter()
-            .filter(|f| f.physical_rows.unwrap_or(0) < target)
-            .count();
+        // Only files below the engine's compaction target can be merged, so only they count;
+        // otherwise a large settled log would trigger a compaction on every flush.
+        let small = p.log.small_files();
         if max == 0 || small <= max {
             return Ok(());
         }
-        let stored = store::physical_rows(&p.dataset);
+        let stored = store::physical_rows(p.log.as_ref());
         let live = self.state.read().view.live;
         if stored > 2 * live + 1024 {
             // Mostly overwritten or deleted rows: materialise the view (skipped while writes are
             // pending; a later flush tries again).
             self.compact_locked(p).map(|_| ())
         } else {
-            // Mostly live rows in many small fragments: merge files only.
-            let before = p.dataset.version().version;
-            let mut ds = p.dataset.clone();
+            // Mostly live rows in many small files: merge files only.
+            let before = p.log.version();
+            let log = p.log.clone();
             let applied = p.applied.clone();
             let lazy = self.opts.lazy_value_threshold;
             let relocate = self.state.read().view.stored_count() > 0;
-            let (ds, u) = rt::block_on(async move {
-                compact_files(&mut ds, CompactionOptions::default(), None).await?;
-                let u = store::unseen(before, &ds, &applied, true, lazy, relocate).await?;
-                Ok::<_, Error>((ds, u))
+            let (log, u) = rt::block_on(async move {
+                let log = log.merge_small().await?;
+                let u = store::unseen(before, &log, &applied, true, lazy, relocate).await?;
+                Ok::<_, Error>((log, u))
             })?;
-            self.absorb(p, ds, u);
+            self.absorb(p, log, u);
             Ok(())
         }
     }
@@ -1037,30 +996,29 @@ impl Inner {
                 store::REWRITE_BATCH_BYTES,
             )
         };
-        let before = p.dataset.version().version;
-        let ds = p.dataset.clone();
+        let before = p.log.version();
+        let log = p.log.clone();
         let applied = p.applied.clone();
-        let o = self.opts.storage_options.clone();
         let lazy = self.opts.lazy_value_threshold;
         let relocate = snapshot.iter().any(|c| !c.stored.is_empty());
-        let (ds, u) = rt::block_on(async move {
-            let after = store::replace(ds, snapshot, o).await?;
+        let (log, u) = rt::block_on(async move {
+            let after = log.rewrite(snapshot).await?;
             let u = store::unseen(before, &after, &applied, true, lazy, relocate).await?;
             Ok::<_, Error>((after, u))
         })?;
-        self.absorb(p, ds, u);
+        self.absorb(p, log, u);
         self.state.write().view.prune(keep_after, marks_after);
         Ok(true)
     }
 
-    fn absorb(&self, p: &mut Persist, ds: Dataset, u: store::Unseen) {
-        self.publish(&ds);
+    fn absorb(&self, p: &mut Persist, log: Log, u: store::Unseen) {
+        self.publish(&log);
         {
             let mut st = self.state.write();
             st.last_refresh = Instant::now();
-            self.take_in(&mut st, &ds, u.rows, u.moved);
+            self.take_in(&mut st, &log, u.rows, u.moved);
         }
-        p.dataset = ds;
+        p.log = log;
         p.applied = u.ids;
     }
 
@@ -1074,11 +1032,16 @@ impl Inner {
         if !st.pending.is_empty() || st.view.entries() < self.opts.snapshot_min_entries {
             return;
         }
-        let version = st.reader.version().version;
+        let version = st.reader.version();
         if version == self.snapshot_version.load(Ordering::Acquire) && path.exists() {
             return;
         }
-        let frags = snapshot::fragments(&st.reader);
+        let frags: Vec<(FileId, String)> = st
+            .reader
+            .files()
+            .into_iter()
+            .map(|f| (f.id, f.ident))
+            .collect();
         match snapshot::write(path, version, &frags, &st.view) {
             Ok(()) => self.snapshot_version.store(version, Ordering::Release),
             Err(e) => {
@@ -1087,12 +1050,12 @@ impl Inner {
         }
     }
 
-    /// Brings the view to `ds`: applies unseen rows, records where committed rows now live, and
-    /// makes `ds` the version its row addresses refer to.
+    /// Brings the view to `log`: applies unseen rows, records where committed rows now live, and
+    /// makes `log` the version its row addresses refer to.
     fn take_in(
         &self,
         st: &mut State,
-        ds: &Dataset,
+        log: &Log,
         rows: Vec<view::Row>,
         moved: Vec<(Bytes, u64, u64)>,
     ) {
@@ -1104,7 +1067,7 @@ impl Inner {
             st.view.relocate(&key, seq, addr);
         }
         st.clock.observe(max);
-        st.reader = ds.clone();
+        st.reader = log.clone();
     }
 
     /// Values of `keys` (whose view entries were `vals` at `reader`'s version). Values kept in
@@ -1115,7 +1078,7 @@ impl Inner {
         &self,
         keys: &[Bytes],
         vals: Vec<Option<Val>>,
-        reader: Dataset,
+        reader: Log,
     ) -> Result<Vec<Option<Bytes>>> {
         match self.resolve(&reader, &vals) {
             Ok(v) => return Ok(v),
@@ -1144,7 +1107,7 @@ impl Inner {
 
     /// Values for `vals`, reading those kept in Lance from `reader` (one read for all misses).
     /// Misses another thread is already reading are waited for, not read again.
-    fn resolve(&self, reader: &Dataset, vals: &[Option<Val>]) -> Result<Vec<Option<Bytes>>> {
+    fn resolve(&self, reader: &Log, vals: &[Option<Val>]) -> Result<Vec<Option<Bytes>>> {
         let mut out: Vec<Option<Bytes>> = Vec::with_capacity(vals.len());
         let mut mine: Vec<(usize, u64)> = Vec::new();
         let mut theirs: Vec<(usize, u64, Arc<Flight>)> = Vec::new();
@@ -1188,8 +1151,8 @@ impl Inner {
             }
             let addrs: Vec<u64> = mine.iter().map(|m| m.1).collect();
             let _land = Land(self, addrs.clone());
-            let ds = reader.clone();
-            let got = rt::block_on(async move { store::take_values(&ds, &addrs).await })?;
+            let log = reader.clone();
+            let got = rt::block_on(async move { store::take(log.as_ref(), &addrs).await })?;
             if got.len() != mine.len() {
                 return Err(Error::Corruption(format!(
                     "read {} values for {} row addresses",
@@ -1215,8 +1178,8 @@ impl Inner {
             out[i] = Some(match hit {
                 Some(b) => b,
                 None => {
-                    let ds = reader.clone();
-                    rt::block_on(async move { store::take_values(&ds, &[addr]).await })?
+                    let log = reader.clone();
+                    rt::block_on(async move { store::take(log.as_ref(), &[addr]).await })?
                         .pop()
                         .expect("one value")
                 }
@@ -1251,23 +1214,21 @@ impl Inner {
             }
         };
         self.state.write().last_refresh = Instant::now();
-        let before = p.dataset.version().version;
-        let ds = p.dataset.clone();
+        let before = p.log.version();
+        let log = p.log.clone();
         let applied = p.applied.clone();
         let threshold = self.opts.lazy_value_threshold;
         let res = rt::block_on(async move {
-            if ds.latest_version_id().await? <= before {
+            let Some(log) = log.refresh().await? else {
                 return Ok::<_, Error>(None);
-            }
-            let mut ds = ds;
-            ds.checkout_latest().await?;
-            let u = store::unseen(before, &ds, &applied, false, threshold, false).await?;
-            Ok(Some((ds, u)))
+            };
+            let u = store::unseen(before, &log, &applied, false, threshold, false).await?;
+            Ok(Some((log, u)))
         })?;
         match res {
             None => Ok(false),
-            Some((ds, u)) => {
-                self.absorb(&mut p, ds, u);
+            Some((log, u)) => {
+                self.absorb(&mut p, log, u);
                 Ok(true)
             }
         }
@@ -1539,7 +1500,7 @@ mod tests {
             other => panic!("not stored: {other:?}"),
         };
         let e =
-            rt::block_on(async move { store::take_values(&reader, &[addr]).await }).unwrap_err();
+            rt::block_on(async move { store::take(reader.as_ref(), &[addr]).await }).unwrap_err();
         assert!(matches!(e, Error::NotFound(_)), "{e:?}");
         assert!(missing_file(&e));
     }
