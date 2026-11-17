@@ -35,6 +35,13 @@ KV0_TEST_BACKEND=delta cargo test -p kv0 --features delta
 uv run --no-sync maturin develop --features delta && KV0_TEST_BACKEND=delta uv run --no-sync pytest
 ```
 
+`tests/chaos.rs` is the Delta engine's concurrency and crash suite: processes writing, compacting,
+deleting, optimizing, cleaning up and purging at once, object-store faults (`kv0::testing`), and
+crashes at every write of a flush, each checked against a model of the acknowledged writes. Every
+test prints its seed; `KV0_CHAOS_SEED=<seed>` repeats the same random choices (up to thread
+timing) and `KV0_CHAOS_SCALE=<n>` multiplies the work. Pull requests run it at scale 1; the
+`Chaos` workflow runs it nightly with larger scales and new seeds (report-only).
+
 Object-store tests run against any S3-compatible server. CI starts RustFS in Docker:
 
 ```sh

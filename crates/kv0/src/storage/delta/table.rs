@@ -15,8 +15,11 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use deltalake_core::logstore::object_store::{ObjectStoreExt, PutMode, PutOptions, PutPayload};
+use deltalake_core::logstore::LogStoreRef;
 use deltalake_core::operations::vacuum::VacuumMode;
-use deltalake_core::{DeltaTable, DeltaTableBuilder, ObjectStore, ObjectStoreError, Path};
+use deltalake_core::{
+    DeltaTable, DeltaTableBuilder, DeltaTableError, ObjectStore, ObjectStoreError, Path,
+};
 use futures::TryStreamExt;
 use url::Url;
 
@@ -59,9 +62,20 @@ pub(crate) fn handle_in(
 ) -> Result<DeltaTable> {
     super::init();
     let url = url(uri)?;
-    let mut b = DeltaTableBuilder::from_url(url.clone())?.with_storage_options(non_empty(options));
+    let builder = || -> Result<DeltaTableBuilder> {
+        Ok(DeltaTableBuilder::from_url(url.clone())?.with_storage_options(non_empty(options)))
+    };
+    let store = match store {
+        Some(s) => Some(s.clone()),
+        // The test hooks wrap the store delta-rs would build.
+        None if super::faults::armed() => {
+            Some(builder()?.build()?.log_store().root_object_store(None))
+        }
+        None => None,
+    };
+    let mut b = builder()?;
     if let Some(s) = store {
-        b = b.with_storage_backend(s.clone(), url);
+        b = b.with_storage_backend(super::faults::wrap(s), url);
     }
     Ok(b.build()?)
 }
@@ -245,11 +259,46 @@ pub(crate) async fn tag_version(table: &DeltaTable, tag: &str) -> Result<u64> {
         })
 }
 
+/// Whether `e` says log files that a load or a commit read were deleted meanwhile, by a
+/// cleanup or purge running at the same time: loading the latest version again gets past it.
+pub(crate) fn log_cut(e: &DeltaTableError) -> bool {
+    if matches!(e, DeltaTableError::InvalidVersion(_)) {
+        return true;
+    }
+    let s = e.to_string();
+    s.contains("No files in log segment")
+        || s.contains("Gap between checkpoint")
+        || s.contains("LogSegment end version")
+        || s.contains("Path does not exist")
+        || (s.contains("_delta_log") && (s.contains("FileNotFound") || s.contains("not found")))
+}
+
+/// Loads `version` (the latest when `None`) on a fresh handle, again (a few times) when a
+/// concurrent cleanup deleted log files while they were read.
+pub(crate) async fn load_at(log_store: LogStoreRef, version: Option<u64>) -> Result<DeltaTable> {
+    let attempts = 6;
+    let mut attempt = 0;
+    loop {
+        let mut t = DeltaTable::new(log_store.clone());
+        let r = match version {
+            Some(v) => t.load_version(v).await,
+            None => t.load().await,
+        };
+        match r {
+            Ok(()) => return Ok(t),
+            Err(e) if log_cut(&e) && attempt + 1 < attempts => {
+                attempt += 1;
+                tracing::debug!(error = %e, attempt, "kv0: log files went away while loading; again");
+                tokio::time::sleep(crate::storage::backoff(attempt, 20, 500)).await;
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+}
+
 /// Loads `version` of the table on a separate handle.
 async fn load(table: &DeltaTable, version: u64) -> Result<DeltaTable> {
-    let mut t = DeltaTable::new(table.log_store());
-    t.load_version(version).await?;
-    Ok(t)
+    load_at(table.log_store(), Some(version)).await
 }
 
 /// Writes a checkpoint at `version` unless one exists.
@@ -414,8 +463,34 @@ async fn delete_all(
 /// tagged after its data files were deleted fails the tag's own check only if its log is gone
 /// too; that window is the time between the two listings.
 pub(crate) async fn cleanup(table: &DeltaTable, c: Cleanup) -> Result<(u64, u64)> {
-    let mut latest = DeltaTable::new(table.log_store());
-    latest.load().await?;
+    // Another cleanup or purge running at the same time may delete log files this one is
+    // reading; it then starts over from the latest version.
+    let mut attempt = 0;
+    loop {
+        match cleanup_once(table, c).await {
+            Err(e) if cut(&e) && attempt < 4 => {
+                attempt += 1;
+                tracing::debug!(error = %e, attempt, "kv0: a concurrent cleanup moved the log; cleaning up again");
+                tokio::time::sleep(crate::storage::backoff(attempt, 20, 500)).await;
+            }
+            r => return r,
+        }
+    }
+}
+
+/// [`log_cut`] for an error already converted.
+fn cut(e: &Error) -> bool {
+    let s = e.to_string();
+    s.contains("No files in log segment")
+        || s.contains("Gap between checkpoint")
+        || s.contains("LogSegment end version")
+        || s.contains("Invalid table version")
+        || s.contains("Path does not exist")
+        || (s.contains("_delta_log") && (s.contains("FileNotFound") || s.contains("not found")))
+}
+
+async fn cleanup_once(table: &DeltaTable, c: Cleanup) -> Result<(u64, u64)> {
+    let latest = load_at(table.log_store(), None).await?;
     let latest_version = latest.version().unwrap_or(0);
     let store = latest.object_store();
     let tagged: Vec<u64> = tags(&latest).await?.into_iter().map(|t| t.1).collect();
@@ -492,17 +567,14 @@ pub(crate) async fn cleanup(table: &DeltaTable, c: Cleanup) -> Result<(u64, u64)
         .map(|t| t.1)
         .chain(tagged.iter().copied())
         .collect();
-    ensure_checkpoint(
-        &latest,
-        keep_from,
-        files.checkpoints.contains_key(&keep_from),
-    )
-    .await?;
     for &t in &tagged_set {
         if t < keep_from {
             ensure_checkpoint(&latest, t, files.checkpoints.contains_key(&t)).await?;
         }
     }
+    // Written last and always, so `_last_checkpoint` (which readers list the log from) names
+    // `keep_from` and not an older checkpoint whose following commits are about to go.
+    ensure_checkpoint(&latest, keep_from, false).await?;
     let mut versions = 0u64;
     for (v, path) in &files.all {
         if *v >= keep_from {

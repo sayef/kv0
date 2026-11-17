@@ -3778,6 +3778,7 @@ dependencies = [
  "arrow-array 59.3.2",
  "arrow-schema 58.4.1",
  "arrow-select 58.4.1",
+ "async-trait",
  "bytes",
  "chrono",
  "criterion",

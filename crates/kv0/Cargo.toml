@@ -33,6 +33,7 @@ delta = [
     "dep:deltalake-gcp",
     "dep:deltalake-azure",
     "dep:url",
+    "dep:async-trait",
 ]
 
 [dependencies]
@@ -50,6 +51,8 @@ deltalake-aws = { version = "=1.0.0", default-features = false, features = ["rus
 deltalake-gcp = { version = "=1.0.0", default-features = false, features = ["rustls"], optional = true }
 deltalake-azure = { version = "=1.0.0", default-features = false, features = ["rustls"], optional = true }
 url = { version = "2", optional = true }
+# Implementing delta-rs's ObjectStore trait (the fault-injecting store of the test hooks).
+async-trait = { version = "0.1", optional = true }
 # Filtering record batches (records folding).
 arrow-select = "58"
 bytes = "1"

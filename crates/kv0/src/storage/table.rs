@@ -259,7 +259,19 @@ impl Root {
             Engine::Lance
         };
         #[cfg(not(feature = "delta"))]
-        let engine = Engine::Lance;
+        let engine = {
+            let runs = super::join(uri, "runs");
+            if super::list_dir(&runs, options)
+                .await?
+                .iter()
+                .any(|n| n == "_delta_log")
+            {
+                return Err(crate::Error::NotSupported(format!(
+                    "{uri} holds Delta Lake tables; this build of kv0 has only the Lance engine (enable the `delta` feature)"
+                )));
+            }
+            Engine::Lance
+        };
         Ok(Root {
             uri: uri.to_string(),
             options: options.clone(),

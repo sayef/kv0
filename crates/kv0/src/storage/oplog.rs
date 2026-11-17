@@ -180,6 +180,16 @@ pub(crate) async fn open(
     if super::delta::chooses(uri, options).await? {
         return super::delta::kv::open(uri, options, version, create, retention, mark_ttl).await;
     }
+    #[cfg(not(feature = "delta"))]
+    if super::list_dir(uri, options)
+        .await?
+        .iter()
+        .any(|n| n == "_delta_log")
+    {
+        return Err(crate::Error::NotSupported(format!(
+            "{uri} holds a Delta Lake table; this build of kv0 has only the Lance engine (enable the `delta` feature)"
+        )));
+    }
     let _ = mark_ttl;
     super::lance::kv::open(uri, options, version, create, retention).await
 }

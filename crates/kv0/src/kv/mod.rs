@@ -659,15 +659,23 @@ impl Db {
         }
         // Compaction must not write unflushed operations (they would be committed twice), so
         // it runs right after a flush that left nothing pending.
-        for _ in 0..8 {
+        // A conflict (another compaction took some of the same files, or a cleanup removed the
+        // commits since this handle's version) is retried on the latest version.
+        let mut last = "writes kept arriving; compaction did not find a quiet moment".to_string();
+        for attempt in 1..=8 {
             self.inner.flush()?;
-            if self.inner.compact()? {
-                return Ok(());
+            match self.inner.compact() {
+                Ok(true) => return Ok(()),
+                Ok(false) => {}
+                Err(Error::Conflict(m)) => {
+                    last = m;
+                    std::thread::sleep(storage::backoff(attempt, 20, 1_000));
+                    self.inner.refresh(true)?;
+                }
+                Err(e) => return Err(e),
             }
         }
-        Err(Error::Conflict(
-            "writes kept arriving; compaction did not find a quiet moment".into(),
-        ))
+        Err(Error::Conflict(last))
     }
 
     /// Drops the handle without flushing, as a crash would; buffered writes stay in the WAL.
