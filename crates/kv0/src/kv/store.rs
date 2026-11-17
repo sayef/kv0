@@ -141,7 +141,11 @@ pub(crate) async fn unseen(
     let unknown: HashSet<FileId> = ids.difference(applied).cloned().collect();
     if ours && after.version() == before_version + 1 {
         let moved = if relocate {
-            addresses(after.as_ref(), &unknown).await?
+            match after.written() {
+                // The engine knows where the commit's rows went without reading them.
+                Some(w) => w.as_ref().clone(),
+                None => addresses(after.as_ref(), &unknown).await?,
+            }
         } else {
             Vec::new()
         };

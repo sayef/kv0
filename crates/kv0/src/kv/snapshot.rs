@@ -1,13 +1,17 @@
-//! A local snapshot of a key-value view, so a reopen loads it instead of rescanning Lance.
+//! A local snapshot of a key-value view, so a reopen loads it instead of rescanning the log.
 //!
-//! Stored next to the dataset's WAL directories (`<wal root>/<xxh3 of the URI>/view.snap`):
-//! `KV0VIEW2`, the log version, each file's id and identity ([`crate::storage::oplog::LogFile`]),
-//! the view (see [`View::write_to`]), then the xxh3-64 of everything before it. A snapshot is
-//! used only when every file it covers is still in the log unchanged: compaction (which may drop
-//! tombstones) or a recreated log invalidates it, and the open falls back to a full scan. Files
-//! committed since are read and applied as usual.
+//! Stored next to the database's WAL directories (`<wal root>/<xxh3 of the URI>/view.snap`):
+//! `KV0VIEW3`, the log version, the log's identity ([`OpLog::log_id`]), each file's id and
+//! identity ([`crate::storage::oplog::LogFile`]), the engine's row-address table
+//! ([`OpLog::addr_table`]), the view (see [`View::write_to`]), then the xxh3-64 of everything
+//! before it. Counts are little-endian `u64`; strings are a little-endian `u32` length and UTF-8
+//! bytes. A snapshot is used only when the log has the same identity and every file it covers is
+//! still in the log unchanged: compaction (which may drop tombstones) or a recreated log
+//! invalidates it, and the open falls back to a full scan. Files committed since are read and
+//! applied as usual.
 //!
-//! Version 2 stores file ids as `u64` (Lance fragment ids).
+//! Version 2 (`KV0VIEW2`, still read) stored file ids as `u64` (Lance fragment ids) and had no
+//! identity or address table.
 
 use std::fs;
 use std::io::{self, BufReader, BufWriter, Read, Write};
@@ -18,7 +22,11 @@ use xxhash_rust::xxh3::Xxh3;
 use super::view::View;
 use crate::storage::oplog::{FileId, OpLog};
 
-const MAGIC: &[u8; 8] = b"KV0VIEW2";
+const MAGIC: &[u8; 8] = b"KV0VIEW3";
+const MAGIC_V2: &[u8; 8] = b"KV0VIEW2";
+
+/// Longest string a snapshot holds (file ids, identities, address-table entries).
+const MAX_STR: usize = 4096;
 
 pub(crate) fn path(root: &Path, uri: &str) -> PathBuf {
     super::wal::dataset_dir(root, uri).join("view.snap")
@@ -53,13 +61,42 @@ fn bad(m: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, m.to_string())
 }
 
-/// Writes a snapshot of `view` at `version` atomically (a temporary file, then a rename).
-pub(crate) fn write(
-    path: &Path,
-    version: u64,
-    frags: &[(FileId, String)],
-    view: &View,
-) -> io::Result<()> {
+fn put_str(w: &mut impl Write, s: &str) -> io::Result<()> {
+    if s.len() > MAX_STR {
+        return Err(bad("string too long for a snapshot"));
+    }
+    w.write_all(&(s.len() as u32).to_le_bytes())?;
+    w.write_all(s.as_bytes())
+}
+
+fn get_str(r: &mut impl Read) -> io::Result<String> {
+    let mut l = [0u8; 4];
+    r.read_exact(&mut l)?;
+    let len = u32::from_le_bytes(l) as usize;
+    if len > MAX_STR {
+        return Err(bad("string too long"));
+    }
+    let mut s = vec![0u8; len];
+    r.read_exact(&mut s)?;
+    String::from_utf8(s).map_err(|_| bad("string is not UTF-8"))
+}
+
+fn get_u64(r: &mut impl Read) -> io::Result<u64> {
+    let mut u = [0u8; 8];
+    r.read_exact(&mut u)?;
+    Ok(u64::from_le_bytes(u))
+}
+
+/// What a snapshot records about the log besides the view.
+pub(crate) struct Saved<'a> {
+    pub version: u64,
+    pub log_id: String,
+    pub frags: &'a [(FileId, String)],
+    pub addr_table: Vec<String>,
+}
+
+/// Writes a snapshot of `view` atomically (a temporary file, then a rename).
+pub(crate) fn write(path: &Path, saved: &Saved<'_>, view: &View) -> io::Result<()> {
     let dir = path.parent().ok_or_else(|| bad("no snapshot directory"))?;
     fs::create_dir_all(dir)?;
     remove_abandoned(dir);
@@ -75,13 +112,16 @@ pub(crate) fn write(
             h: Xxh3::new(),
         };
         w.write_all(MAGIC)?;
-        w.write_all(&version.to_le_bytes())?;
-        w.write_all(&(frags.len() as u64).to_le_bytes())?;
-        for (id, ident) in frags {
-            let id: u64 = id.0.parse().map_err(|_| bad("file id is not numeric"))?;
-            w.write_all(&id.to_le_bytes())?;
-            w.write_all(&(ident.len() as u32).to_le_bytes())?;
-            w.write_all(ident.as_bytes())?;
+        w.write_all(&saved.version.to_le_bytes())?;
+        put_str(&mut w, &saved.log_id)?;
+        w.write_all(&(saved.frags.len() as u64).to_le_bytes())?;
+        for (id, ident) in saved.frags {
+            put_str(&mut w, &id.0)?;
+            put_str(&mut w, ident)?;
+        }
+        w.write_all(&(saved.addr_table.len() as u64).to_le_bytes())?;
+        for e in &saved.addr_table {
+            put_str(&mut w, e)?;
         }
         view.write_to(&mut w)?;
         let digest = w.h.digest();
@@ -126,7 +166,9 @@ fn remove_abandoned(dir: &Path) {
 
 pub(crate) struct Loaded {
     pub version: u64,
+    pub log_id: String,
     pub frags: Vec<(FileId, String)>,
+    pub addr_table: Vec<String>,
     pub view: View,
 }
 
@@ -143,30 +185,29 @@ pub(crate) fn read(path: &Path) -> io::Result<Option<Loaded>> {
     };
     let mut magic = [0u8; 8];
     r.read_exact(&mut magic)?;
-    if &magic != MAGIC {
+    let v2 = &magic == MAGIC_V2;
+    if &magic != MAGIC && !v2 {
         return Err(bad("not a kv0 view snapshot"));
     }
-    let mut u = [0u8; 8];
-    r.read_exact(&mut u)?;
-    let version = u64::from_le_bytes(u);
-    r.read_exact(&mut u)?;
-    let n = u64::from_le_bytes(u);
+    let version = get_u64(&mut r)?;
+    let log_id = if v2 { String::new() } else { get_str(&mut r)? };
+    let n = get_u64(&mut r)?;
     let mut frags = Vec::new();
     for _ in 0..n {
-        r.read_exact(&mut u)?;
-        let id = u64::from_le_bytes(u);
-        let mut l = [0u8; 4];
-        r.read_exact(&mut l)?;
-        let len = u32::from_le_bytes(l) as usize;
-        if len > 4096 {
-            return Err(bad("fragment identity too long"));
+        let id = if v2 {
+            get_u64(&mut r)?.to_string()
+        } else {
+            get_str(&mut r)?
+        };
+        let ident = get_str(&mut r)?;
+        frags.push((FileId(id), ident));
+    }
+    let mut addr_table = Vec::new();
+    if !v2 {
+        let n = get_u64(&mut r)?;
+        for _ in 0..n {
+            addr_table.push(get_str(&mut r)?);
         }
-        let mut s = vec![0u8; len];
-        r.read_exact(&mut s)?;
-        frags.push((
-            FileId(id.to_string()),
-            String::from_utf8(s).map_err(|_| bad("fragment identity"))?,
-        ));
     }
     let view = View::read_from(&mut r)?;
     let digest = r.h.digest();
@@ -177,17 +218,75 @@ pub(crate) fn read(path: &Path) -> io::Result<Option<Loaded>> {
     }
     Ok(Some(Loaded {
         version,
+        log_id,
         frags,
+        addr_table,
         view,
     }))
 }
 
-/// Whether a snapshot still describes `log`: every file it covers is present and unchanged.
+/// Whether a snapshot still describes `log`: the same log, and every file it covers present
+/// and unchanged.
 pub(crate) fn still_valid(l: &Loaded, log: &dyn OpLog) -> bool {
-    if log.version() < l.version {
+    if log.version() < l.version || log.log_id() != l.log_id {
         return false;
     }
     let now: std::collections::HashMap<FileId, String> =
         log.files().into_iter().map(|f| (f.id, f.ident)).collect();
     l.frags.iter().all(|(id, ident)| now.get(id) == Some(ident))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A `KV0VIEW2` file, as kv0 0.1.0-beta.2 wrote it, still loads.
+    #[test]
+    fn reads_version_2() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("view.snap");
+        let mut view = View::default();
+        view.apply(crate::kv::view::Op {
+            seq: 7,
+            kind: crate::kv::view::OP_PUT,
+            key: bytes::Bytes::from_static(b"k"),
+            value: Some(bytes::Bytes::from_static(b"v")),
+        });
+        let mut w = Hashing {
+            inner: Vec::new(),
+            h: Xxh3::new(),
+        };
+        w.write_all(MAGIC_V2).unwrap();
+        w.write_all(&3u64.to_le_bytes()).unwrap();
+        w.write_all(&1u64.to_le_bytes()).unwrap();
+        w.write_all(&5u64.to_le_bytes()).unwrap();
+        put_str(&mut w, "data/x.lance|1|").unwrap();
+        view.write_to(&mut w).unwrap();
+        let digest = w.h.digest();
+        let mut bytes = w.inner;
+        bytes.extend_from_slice(&digest.to_le_bytes());
+        fs::write(&p, bytes).unwrap();
+        let l = read(&p).unwrap().unwrap();
+        assert_eq!(l.version, 3);
+        assert_eq!(l.log_id, "");
+        assert_eq!(
+            l.frags,
+            vec![(FileId("5".into()), "data/x.lance|1|".into())]
+        );
+        assert!(l.addr_table.is_empty());
+        assert_eq!(l.view.live, 1);
+
+        // Written back as version 3, with string ids.
+        let saved = Saved {
+            version: 4,
+            log_id: "id".into(),
+            frags: &[(FileId("part-1.parquet".into()), "part-1.parquet|10".into())],
+            addr_table: vec!["part-1.parquet|10".into()],
+        };
+        write(&p, &saved, &l.view).unwrap();
+        let l = read(&p).unwrap().unwrap();
+        assert_eq!((l.version, l.log_id.as_str()), (4, "id"));
+        assert_eq!(l.frags[0].0, FileId("part-1.parquet".into()));
+        assert_eq!(l.addr_table, vec!["part-1.parquet|10".to_string()]);
+    }
 }

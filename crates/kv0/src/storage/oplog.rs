@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use futures::future::BoxFuture;
+use futures::FutureExt;
 
 use crate::error::Result;
 use crate::kv::view::{Op, SnapChunk};
@@ -123,16 +124,55 @@ pub(crate) trait OpLog: Send + Sync + 'static {
     fn create_tag<'a>(&'a self, tag: &'a str, version: u64) -> BoxFuture<'a, Result<()>>;
 
     fn delete_tag<'a>(&'a self, tag: &'a str) -> BoxFuture<'a, Result<()>>;
+
+    /// The highest sequence number `writer` committed, for engines that keep writer marks
+    /// outside the rows (Delta's `txn` actions). `None` when the engine keeps them as rows,
+    /// which the view reads like any other.
+    fn writer_mark<'a>(&'a self, _writer: &'a str) -> BoxFuture<'a, Result<Option<u64>>> {
+        futures::future::ready(Ok(None)).boxed()
+    }
+
+    /// The log's identity: a log deleted and created again at the same location gets a new
+    /// one. Empty when the engine has none.
+    fn log_id(&self) -> String {
+        String::new()
+    }
+
+    /// The engine's table behind row addresses, when it keeps one per handle (Delta numbers
+    /// files as it meets them), so a view snapshot can restore it with its addresses.
+    fn addr_table(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Restores a table [`OpLog::addr_table`] returned, before anything is read.
+    fn restore_addr_table(&self, _table: Vec<String>) {}
+
+    /// `(key, seq, row address)` of every put the commit that made this version wrote, when
+    /// this handle made it and the engine knows them without reading (an append).
+    fn written(&self) -> Option<Arc<Vec<(Bytes, u64, u64)>>> {
+        None
+    }
 }
 
 /// Opens the log at `uri`: at `version` when given, else the latest version, creating an empty
-/// log when there is none and `create` is set. `retention` applies to a log created here.
+/// log when there is none and `create` is set. `retention` and `mark_ttl` (how long writer marks
+/// are kept, where the engine keeps them itself) apply to a log created here.
+///
+/// With the `delta` feature, a location that holds a Delta table opens with the Delta engine,
+/// one that holds a Lance dataset with Lance, and a new one with Delta when
+/// `KV0_TEST_BACKEND=delta` is set.
 pub(crate) async fn open(
     uri: &str,
     options: &super::StorageOptions,
     version: Option<u64>,
     create: bool,
     retention: Option<std::time::Duration>,
+    mark_ttl: std::time::Duration,
 ) -> Result<Log> {
+    #[cfg(feature = "delta")]
+    if super::delta::chooses(uri, options).await? {
+        return super::delta::kv::open(uri, options, version, create, retention, mark_ttl).await;
+    }
+    let _ = mark_ttl;
     super::lance::kv::open(uri, options, version, create, retention).await
 }
