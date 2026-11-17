@@ -118,7 +118,7 @@ jobs:
           # Parallel builds of Lance's test binaries need more than the runner's memory.
           - os: ubuntu-24.04-arm
             jobs: 2
-          # The key-value suites again on the Delta Lake engine, plus its own tests.
+          # The key-value and tracking suites again on the Delta Lake engine, plus its own tests.
           - os: ubuntu-latest
             backend: delta
             features: --features delta
@@ -157,7 +157,16 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
         python: ["3.11", "3.13"]
+        include:
+          # The Python suite again on the Delta Lake engine (key-value and tracking).
+          - os: ubuntu-latest
+            python: "3.13"
+            backend: delta
+            features: --features delta
+    name: python (${{ matrix.os }}, ${{ matrix.python }}${{ matrix.backend && format(', {0}', matrix.backend) || '' }})
     runs-on: ${{ matrix.os }}
+    env:
+      KV0_TEST_BACKEND: ${{ matrix.backend || 'lance' }}
     # Fails a hung run instead of holding the runner for the default six hours.
     timeout-minutes: 60
     steps:
@@ -182,7 +191,7 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - run: uv sync --locked --no-install-project
       # A debug build: release builds of Lance with LTO take far longer than the tests.
-      - run: uv run --no-sync maturin build -o dist
+      - run: uv run --no-sync maturin build -o dist ${{ matrix.features }}
       - run: uv pip install --no-index --find-links dist kv0
       - run: uv run --no-sync pytest crates/kv0-py/tests
       - run: uv run --no-sync python crates/kv0-py/examples/quickstart.py && uv run --no-sync python crates/kv0-py/examples/tracking.py
