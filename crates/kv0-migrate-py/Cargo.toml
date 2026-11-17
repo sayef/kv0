@@ -1,0 +1,26 @@
+[package]
+name = "kv0-migrate-py"
+description = "Python bindings for kv0's migration from Lance to Delta Lake"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "kv0_migrate"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.30", features = ["extension-module", "abi3-py311"] }
+pyo3-log = "0.13"
+serde_json = "1"
+kv0_rs = { package = "kv0", path = "../kv0" }
+
+[features]
+# The migration itself (kv0's `lance-migrate`, which brings the Delta Lake engine). The wheel
+# build turns it on (pyproject.toml); without it the crate is empty, so `cargo build
+# --workspace` keeps building kv0 with its default features only.
+migrate = ["kv0_rs/lance-migrate"]

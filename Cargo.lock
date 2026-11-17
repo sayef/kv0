@@ -3801,6 +3801,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "kv0-migrate-py"
+version = "0.1.0-beta.2"
+dependencies = [
+ "kv0",
+ "pyo3",
+ "pyo3-log",
+ "serde_json",
+]
+
+[[package]]
 name = "kv0-py"
 version = "0.1.0-beta.2"
 dependencies = [
