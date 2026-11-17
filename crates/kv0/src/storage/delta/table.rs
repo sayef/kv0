@@ -11,6 +11,7 @@
 //!   sure a checkpoint exists there.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use deltalake_core::logstore::object_store::{ObjectStoreExt, PutMode, PutOptions, PutPayload};
@@ -50,10 +51,23 @@ pub(crate) fn url(uri: &str) -> Result<Url> {
 
 /// An unloaded table handle at `uri`: its log store, without reading anything.
 pub(crate) fn handle(uri: &str, options: &StorageOptions) -> Result<DeltaTable> {
+    handle_in(uri, options, None)
+}
+
+/// [`handle`], on `store` (rooted at the store's root) when given: the tables of one
+/// `memory://` repository share one in-memory store.
+pub(crate) fn handle_in(
+    uri: &str,
+    options: &StorageOptions,
+    store: Option<&Arc<dyn ObjectStore>>,
+) -> Result<DeltaTable> {
     super::init();
-    Ok(DeltaTableBuilder::from_url(url(uri)?)?
-        .with_storage_options(non_empty(options))
-        .build()?)
+    let url = url(uri)?;
+    let mut b = DeltaTableBuilder::from_url(url.clone())?.with_storage_options(non_empty(options));
+    if let Some(s) = store {
+        b = b.with_storage_backend(s.clone(), url);
+    }
+    Ok(b.build()?)
 }
 
 /// What a location holds.

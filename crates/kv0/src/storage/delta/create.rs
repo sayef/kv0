@@ -7,12 +7,12 @@
 //! version 1 holds no protocol or metadata action.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use deltalake_core::kernel::transaction::CommitProperties;
 use deltalake_core::kernel::StructField;
 use deltalake_core::protocol::SaveMode;
-use deltalake_core::DeltaTable;
+use deltalake_core::{DeltaTable, ObjectStore};
 
 use super::table;
 use crate::error::{Error, Result};
@@ -31,8 +31,9 @@ pub(crate) async fn open(
     options: &StorageOptions,
     version: Option<u64>,
     create: Option<&Spec>,
+    store: Option<&Arc<dyn ObjectStore>>,
 ) -> Result<DeltaTable> {
-    let mut t = table::handle(uri, options)?;
+    let mut t = table::handle_in(uri, options, store)?;
     if t.verify_deltatable_existence().await? {
         match version {
             Some(v) => t.load_version(v).await?,
@@ -42,7 +43,7 @@ pub(crate) async fn open(
         let Some(spec) = create.filter(|_| version.is_none()) else {
             return Err(Error::NotFound(format!("no kv0 table at {uri}")));
         };
-        if is_local(uri) {
+        if is_local(uri) && store.is_none() {
             let dir = uri.strip_prefix("file://").unwrap_or(uri);
             std::fs::create_dir_all(dir).map_err(|e| Error::Io(format!("{dir}: {e}")))?;
         }

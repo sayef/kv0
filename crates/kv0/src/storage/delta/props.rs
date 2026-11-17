@@ -41,6 +41,22 @@ pub(crate) fn kv_writer() -> WriterProperties {
         .build()
 }
 
+/// Writer settings for tracking and records tables: page statistics (and with them the column
+/// and offset indexes), and a Bloom filter on `bloom` (records' `item_id`), so a lookup of one
+/// value skips the row groups that cannot hold it.
+pub(crate) fn rows_writer(bloom: Option<&str>) -> WriterProperties {
+    let b = WriterProperties::builder()
+        .set_compression(compression())
+        .set_max_row_group_row_count(Some(ROW_GROUP_ROWS))
+        .set_statistics_enabled(EnabledStatistics::Page);
+    match bloom {
+        Some(c) => b
+            .set_column_bloom_filter_enabled(ColumnPath::from(c), true)
+            .build(),
+        None => b.build(),
+    }
+}
+
 /// A duration as a Delta interval string.
 fn interval(d: Option<Duration>) -> String {
     match d {

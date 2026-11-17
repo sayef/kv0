@@ -69,7 +69,7 @@ pub(crate) async fn open(
         columns: COLUMNS.clone(),
         config: props::table_config(retention, mark_ttl, STATS_COLUMNS),
     };
-    let table = create::open(uri, options, version, create.then_some(&spec)).await?;
+    let table = create::open(uri, options, version, create.then_some(&spec), None).await?;
     let shared = Arc::new(Shared {
         uri: uri.to_string(),
         footers: Arc::new(FooterCache::default()),
