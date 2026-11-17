@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/kv0", "crates/kv0-py"]
+members = ["crates/kv0", "crates/kv0-py", "crates/kv0-migrate-py"]
 
 [workspace.package]
 version = "0.1.0-beta.2"

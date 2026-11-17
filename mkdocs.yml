@@ -90,6 +90,7 @@ nav:
       - Tracking tables: guides/tracking.md
       - Configuration: guides/configuration.md
       - Operations and cleanup: guides/operations.md
+      - Migrating to Delta Lake: guides/migration.md
   - Benchmarks: benchmarks.md
   - Design:
       - Design and guarantees: design.md

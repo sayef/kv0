@@ -241,6 +241,28 @@ pub(crate) async fn append(
     .await
 }
 
+/// Commits writer marks alone (`txn` actions, no data): a migration carries over the marks of
+/// the writers of the source.
+#[cfg(feature = "lance-migrate")]
+pub(crate) async fn marks(table: &DeltaTable, txns: Vec<Transaction>) -> Result<DeltaTable> {
+    let mut p = properties("marks", true, None);
+    for t in txns {
+        p = p.with_application_transaction(t);
+    }
+    commit(
+        table,
+        Vec::new(),
+        DeltaOperation::Write {
+            mode: SaveMode::Append,
+            partition_by: None,
+            predicate: None,
+        },
+        p,
+        true,
+    )
+    .await
+}
+
 /// Commits a rewrite: removes `removed` (files of `table`'s version) and adds `adds`, all with
 /// `data_change = false`.
 pub(crate) async fn rewrite(

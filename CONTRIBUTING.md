@@ -35,6 +35,16 @@ KV0_TEST_BACKEND=delta cargo test -p kv0 --features delta
 uv run --no-sync maturin develop --features delta && KV0_TEST_BACKEND=delta uv run --no-sync pytest
 ```
 
+The migration from Lance (`kv0 migrate`, `crates/kv0/src/migrate.rs`) is behind the
+`lance-migrate` feature, which includes `delta`; its Python package `kv0-migrate` lives in
+`crates/kv0-migrate-py` (built and tested in CI, not published yet):
+
+```sh
+cargo test -p kv0 --features lance-migrate --test migrate
+uv run --no-sync maturin develop -m crates/kv0-migrate-py/Cargo.toml
+uv run --no-sync pytest crates/kv0-migrate-py/tests
+```
+
 `tests/chaos.rs` is the Delta engine's concurrency and crash suite: processes writing, compacting,
 deleting, optimizing, cleaning up and purging at once, object-store faults (`kv0::testing`), and
 crashes at every write of a flush, each checked against a model of the acknowledged writes. Every

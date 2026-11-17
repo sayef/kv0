@@ -35,6 +35,9 @@ delta = [
     "dep:url",
     "dep:async-trait",
 ]
+# `kv0 migrate`: converts locations written with the Lance engine (kv0 0.1.0-beta.2 and earlier)
+# to Delta Lake (`kv0::migrate`, and the `kv0` binary). Off by default.
+lance-migrate = ["delta"]
 
 [dependencies]
 lance = { version = "14.0.2", default-features = false }
@@ -70,6 +73,11 @@ xxhash-rust = { version = "0.8", features = ["xxh3"] }
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+
+[[bin]]
+name = "kv0"
+path = "src/bin/kv0.rs"
+required-features = ["lance-migrate"]
 
 [[bench]]
 name = "kv"

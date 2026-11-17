@@ -310,7 +310,7 @@ pub(crate) async fn write_marker(uri: &str, options: &StorageOptions, kind: Kind
 const RETRIES: u32 = 3;
 
 /// Names directly under `uri` (empty when it does not exist).
-async fn list(uri: &str, options: &StorageOptions) -> Result<Vec<String>> {
+pub(crate) async fn list(uri: &str, options: &StorageOptions) -> Result<Vec<String>> {
     if is_local(uri) {
         let path = uri.strip_prefix("file://").unwrap_or(uri);
         return match std::fs::read_dir(path) {
@@ -356,7 +356,7 @@ async fn list(uri: &str, options: &StorageOptions) -> Result<Vec<String>> {
 }
 
 /// The marker of `uri`, when it has one.
-async fn read_marker(uri: &str, options: &StorageOptions) -> Result<Option<Marker>> {
+pub(crate) async fn read_marker(uri: &str, options: &StorageOptions) -> Result<Option<Marker>> {
     let body: Option<Vec<u8>> = if is_local(uri) {
         let path = std::path::Path::new(uri.strip_prefix("file://").unwrap_or(uri)).join(MARKER);
         match std::fs::read(&path) {

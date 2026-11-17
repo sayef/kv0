@@ -152,6 +152,24 @@ pub(crate) trait Table: Send + Sync + 'static {
     }
 
     /// Adds the nullable columns of `added`, null in every existing row.
+    /// Commits writer marks alone, for a migration carrying over the source's marks.
+    #[cfg(feature = "lance-migrate")]
+    fn adopt_marks(&mut self, _marks: Vec<WriterMark>) -> BoxFuture<'_, Result<()>> {
+        async {
+            Err(crate::Error::NotSupported(
+                "this engine cannot be a migration's target".into(),
+            ))
+        }
+        .boxed()
+    }
+
+    /// When the latest version was committed (microseconds since the epoch), where the engine
+    /// records it: a migration refuses a source that writers are still committing to.
+    #[cfg(feature = "lance-migrate")]
+    fn last_commit_micros(&self) -> BoxFuture<'_, Result<Option<i64>>> {
+        async { Ok(None) }.boxed()
+    }
+
     fn add_columns(&mut self, added: SchemaRef) -> BoxFuture<'_, Result<()>>;
 
     /// Removes the rows matching `pred`, in one commit.
@@ -280,6 +298,31 @@ impl Root {
             options: options.clone(),
             engine,
         })
+    }
+
+    /// The Lance repository at `uri`, without detection (a migration's source, which may share
+    /// its location with the target).
+    #[cfg(feature = "lance-migrate")]
+    pub(crate) fn lance_at(uri: &str, options: &StorageOptions) -> Root {
+        Root {
+            uri: uri.to_string(),
+            options: options.clone(),
+            engine: Engine::Lance,
+        }
+    }
+
+    /// A Delta repository at `uri`, without detection and without writing the format marker
+    /// (a migration writes it once everything is verified).
+    #[cfg(feature = "lance-migrate")]
+    pub(crate) fn delta_at(uri: &str, options: &StorageOptions) -> Root {
+        Root {
+            uri: uri.to_string(),
+            options: options.clone(),
+            engine: Engine::Delta(uri.starts_with("memory://").then(|| {
+                Arc::new(deltalake_core::logstore::object_store::memory::InMemory::new())
+                    as Arc<dyn deltalake_core::ObjectStore>
+            })),
+        }
     }
 
     /// Whether the tables are Delta tables.

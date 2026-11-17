@@ -865,6 +865,22 @@ impl Table for RowTable {
         true
     }
 
+    #[cfg(feature = "lance-migrate")]
+    fn adopt_marks(&mut self, marks: Vec<WriterMark>) -> BoxFuture<'_, Result<()>> {
+        async move {
+            if marks.is_empty() {
+                return Ok(());
+            }
+            let txns = marks
+                .iter()
+                .map(|m| commit::mark(&m.writer, seq_to_i64(m.seq)))
+                .collect();
+            let t = commit::marks(&self.table, txns).await?;
+            self.moved(t)
+        }
+        .boxed()
+    }
+
     /// `added` is the stored (Lance) layout; Delta stores its logical form. A metadata commit,
     /// so concurrent writers each retry once.
     fn add_columns(&mut self, added: SchemaRef) -> BoxFuture<'_, Result<()>> {
