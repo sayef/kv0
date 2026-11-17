@@ -38,7 +38,14 @@ fn key_value_tags_under_a_path_with_special_characters_protect_their_version() {
             Some(&b"v1"[..]),
             "{name}"
         );
-        let refs = std::path::Path::new(&path).join("_refs");
+        // Lance keeps tags under `_refs/`, Delta under `_kv0/tags/`.
+        let refs = std::path::Path::new(&path).join(
+            if std::env::var("KV0_TEST_BACKEND").as_deref() == Ok("delta") {
+                "_kv0/tags"
+            } else {
+                "_refs"
+            },
+        );
         assert!(
             refs.exists(),
             "{name}: the tag is in the dataset's own directory"

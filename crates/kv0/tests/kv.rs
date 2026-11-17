@@ -112,10 +112,12 @@ fn persists_across_reopen_and_compaction() {
     db.compact().unwrap();
     let s = db.stats();
     assert_eq!(s.fragments, 1);
+    // Lance keeps the WAL mark as a row; Delta as a `txn` action.
+    let mark_rows = usize::from(std::env::var("KV0_TEST_BACKEND").as_deref() != Ok("delta"));
     assert_eq!(
         s.stored_rows,
-        990 + 1 + 1,
-        "live rows, one range tombstone and one WAL mark"
+        990 + 1 + mark_rows,
+        "live rows, one range tombstone and the WAL mark"
     );
     drop(db);
     let db = Db::open(&p, opts()).unwrap();
