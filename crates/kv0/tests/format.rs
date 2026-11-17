@@ -326,10 +326,22 @@ mod delta {
         .unwrap();
         // Strip the property from the creating commit, as another tool's table would lack it.
         let first = db.join("_delta_log/00000000000000000000.json");
-        let body = std::fs::read_to_string(&first)
+        // Configuration is a map: the property's place in the JSON varies, so edit it as JSON.
+        let body: Vec<String> = std::fs::read_to_string(&first)
             .unwrap()
-            .replace(r#""kv0.format":"delta/1","#, "");
-        std::fs::write(&first, body).unwrap();
+            .lines()
+            .map(|l| {
+                let mut a: serde_json::Value = serde_json::from_str(l).unwrap();
+                if let Some(c) = a
+                    .pointer_mut("/metaData/configuration")
+                    .and_then(|c| c.as_object_mut())
+                {
+                    assert!(c.remove("kv0.format").is_some());
+                }
+                a.to_string()
+            })
+            .collect();
+        std::fs::write(&first, body.join("\n") + "\n").unwrap();
         for e in std::fs::read_dir(db.join("_delta_log")).unwrap().flatten() {
             if e.file_name().to_string_lossy().contains("checkpoint") {
                 std::fs::remove_file(e.path()).unwrap();
