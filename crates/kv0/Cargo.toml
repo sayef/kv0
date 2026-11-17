@@ -23,6 +23,17 @@ default = ["aws", "gcp", "azure"]
 aws = ["lance/aws"]
 gcp = ["lance/gcp"]
 azure = ["lance/azure"]
+# The Delta Lake engine (delta-rs without DataFusion) for the key-value layer, next to Lance. Off
+# by default while both engines coexist. Cargo cannot enable a dependency only when two features
+# are on, so `delta` builds all three object-store handlers and registers those whose feature
+# (`aws`, `gcp`, `azure`) is on.
+delta = [
+    "dep:deltalake-core",
+    "dep:deltalake-aws",
+    "dep:deltalake-gcp",
+    "dep:deltalake-azure",
+    "dep:url",
+]
 
 [dependencies]
 lance = { version = "14.0.2", default-features = false }
@@ -32,6 +43,13 @@ arrow-schema = "58"
 # Arrow 59, the version of the Delta Lake engine; batches cross over the C data interface
 # (storage/arrow_bridge.rs).
 arrow-array-59 = { package = "arrow-array", version = "59", features = ["ffi"] }
+# Delta Lake, pinned exactly: delta-rs builds on a vendor fork of the Delta kernel, so upgrades
+# go in their own pull requests. Arrow and Parquet 59 come from its re-exports.
+deltalake-core = { version = "=1.1.4", default-features = false, features = ["rustls"], optional = true }
+deltalake-aws = { version = "=1.0.0", default-features = false, features = ["rustls"], optional = true }
+deltalake-gcp = { version = "=1.0.0", default-features = false, features = ["rustls"], optional = true }
+deltalake-azure = { version = "=1.0.0", default-features = false, features = ["rustls"], optional = true }
+url = { version = "2", optional = true }
 # Filtering record batches (records folding).
 arrow-select = "58"
 bytes = "1"

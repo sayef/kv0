@@ -40,6 +40,11 @@ fn wal_files(root: &Path) -> Vec<PathBuf> {
     out
 }
 
+/// Rows a writer's mark takes in storage: Lance keeps it as a row, Delta as a `txn` action.
+fn mark_rows() -> usize {
+    usize::from(std::env::var("KV0_TEST_BACKEND").as_deref() != Ok("delta"))
+}
+
 fn count(db: &Db) -> usize {
     let mut it = db.iter();
     it.seek_to_first();
@@ -190,10 +195,10 @@ fn replay_after_commit_before_truncate_is_idempotent() {
     }
 
     let db = Db::open(&db_path, opts(&wal)).unwrap();
-    // The later flush added one put and its mark row; the replay added nothing.
+    // The later flush added one put and its mark; the replay added nothing.
     assert_eq!(
         db.stats().stored_rows,
-        stored + 2,
+        stored + 1 + mark_rows(),
         "nothing was appended twice"
     );
     assert_eq!(count(&db), 90);
@@ -449,5 +454,9 @@ fn reopening_reuses_the_writer_id_so_marks_do_not_accumulate() {
     }
     let db = Db::open(&db_path, opts(&wal)).unwrap();
     db.compact().unwrap();
-    assert_eq!(db.stats().stored_rows, 2, "one key and one writer's mark");
+    assert_eq!(
+        db.stats().stored_rows,
+        1 + mark_rows(),
+        "one key and one writer's mark"
+    );
 }

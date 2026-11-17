@@ -80,3 +80,55 @@ impl From<serde_json::Error> for Error {
         Error::InvalidArgument(e.to_string())
     }
 }
+
+#[cfg(feature = "delta")]
+impl From<deltalake_core::DeltaTableError> for Error {
+    fn from(e: deltalake_core::DeltaTableError) -> Self {
+        use deltalake_core::kernel::transaction::TransactionError as T;
+        use deltalake_core::DeltaTableError as D;
+        if crate::storage::delta::not_found(&e) {
+            return Error::NotFound(e.to_string());
+        }
+        match e {
+            D::NotATable(_) => Error::NotFound(e.to_string()),
+            D::InvalidJsonLog { .. } | D::InvalidStatsJson { .. } | D::InvalidData { .. } => {
+                Error::Corruption(e.to_string())
+            }
+            D::Transaction {
+                source: T::CommitConflict(_) | T::MaxCommitAttempts(_) | T::VersionAlreadyExists(_),
+            }
+            | D::VersionAlreadyExists(_) => Error::Conflict(e.to_string()),
+            D::Io { .. } => Error::Io(e.to_string()),
+            other => Error::Storage(Box::new(other)),
+        }
+    }
+}
+
+#[cfg(feature = "delta")]
+impl From<deltalake_core::parquet::errors::ParquetError> for Error {
+    fn from(e: deltalake_core::parquet::errors::ParquetError) -> Self {
+        if crate::storage::delta::not_found(&e) {
+            Error::NotFound(e.to_string())
+        } else {
+            Error::Storage(Box::new(e))
+        }
+    }
+}
+
+#[cfg(feature = "delta")]
+impl From<deltalake_core::ObjectStoreError> for Error {
+    fn from(e: deltalake_core::ObjectStoreError) -> Self {
+        if crate::storage::delta::not_found(&e) {
+            Error::NotFound(e.to_string())
+        } else {
+            Error::Io(e.to_string())
+        }
+    }
+}
+
+#[cfg(feature = "delta")]
+impl From<deltalake_core::arrow::error::ArrowError> for Error {
+    fn from(e: deltalake_core::arrow::error::ArrowError) -> Self {
+        Error::Storage(Box::new(e))
+    }
+}

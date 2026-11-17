@@ -308,6 +308,7 @@ impl Db {
                     o.version,
                     o.create_if_missing && !o.read_only,
                     o.version_retention,
+                    o.mark_ttl,
                 )
                 .await?;
                 match loaded {
@@ -315,7 +316,9 @@ impl Db {
                         if l.view.lazy_threshold == o.lazy_value_threshold
                             && snapshot::still_valid(&l, log.as_ref()) =>
                     {
-                        // Start from the snapshot; read only files committed since.
+                        // Start from the snapshot; read only files committed since. The
+                        // snapshot's row addresses refer to the engine's address table.
+                        log.restore_addr_table(l.addr_table);
                         let known: HashSet<FileId> = l.frags.iter().map(|f| f.0.clone()).collect();
                         let newer: HashSet<FileId> = store::file_ids(log.as_ref())
                             .difference(&known)
@@ -360,7 +363,17 @@ impl Db {
                 if o.ops.is_empty() {
                     continue;
                 }
-                let committed = view.marks.get(o.writer_id.as_bytes()).copied().unwrap_or(0);
+                // Marks are rows of the log (read into the view) or kept by the engine.
+                let kept = {
+                    let (log, writer) = (stored.clone(), o.writer_id.clone());
+                    rt::block_on(async move { log.writer_mark(&writer).await })?
+                };
+                let committed = view
+                    .marks
+                    .get(o.writer_id.as_bytes())
+                    .copied()
+                    .unwrap_or(0)
+                    .max(kept.unwrap_or(0));
                 // Ambiguous only if it holds an operation old enough that its mark (which is at
                 // least that operation's sequence number, had it been committed) may have been
                 // pruned. Newer operations are certainly not committed.
@@ -1042,7 +1055,13 @@ impl Inner {
             .into_iter()
             .map(|f| (f.id, f.ident))
             .collect();
-        match snapshot::write(path, version, &frags, &st.view) {
+        let saved = snapshot::Saved {
+            version,
+            log_id: st.reader.log_id(),
+            frags: &frags,
+            addr_table: st.reader.addr_table(),
+        };
+        match snapshot::write(path, &saved, &st.view) {
             Ok(()) => self.snapshot_version.store(version, Ordering::Release),
             Err(e) => {
                 tracing::warn!(path = %path.display(), error = %e, "kv0: saving the view snapshot failed")
@@ -1491,8 +1510,14 @@ mod tests {
         .unwrap();
         db.put(b"a", &[1u8; 100]).unwrap();
         db.flush().unwrap();
-        for f in std::fs::read_dir(path.join("data")).unwrap() {
-            std::fs::remove_file(f.unwrap().path()).unwrap();
+        // Lance keeps data files under `data/`, Delta next to `_delta_log/`.
+        let lance = path.join("data");
+        let dir = if lance.is_dir() { lance } else { path.clone() };
+        for f in std::fs::read_dir(dir).unwrap() {
+            let f = f.unwrap().path();
+            if f.is_file() {
+                std::fs::remove_file(f).unwrap();
+            }
         }
         let reader = db.inner.state.read().reader.clone();
         let addr = match db.inner.state.read().view.get(b"a") {
