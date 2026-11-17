@@ -348,12 +348,13 @@ def start_s3():
         == "true"
     )
     if not running:
-        subprocess.run(["docker", "rm", "-f", "kv0-eval-s3"], check=False, capture_output=True)
+        subprocess.run(["docker", "rm", "-f", "-v", "kv0-eval-s3"], check=False, capture_output=True)
         subprocess.run(
             [
                 "docker",
                 "run",
                 "-d",
+                "--rm",
                 "--name",
                 "kv0-eval-s3",
                 "-p",
