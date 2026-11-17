@@ -29,8 +29,11 @@ class Repo(_Repo):
         create_if_missing: Create the tables when they do not exist.
         flush_rows: Commit once this many metric points are buffered.
         flush_interval: Seconds between background commits; ``None`` disables.
-        version_retention: When creating the tables, delete versions older than this many seconds
-            automatically; ``None`` keeps every version.
+        version_retention: Delete versions older than this many seconds automatically; ``None``
+            keeps every version.
+        orphan_grace: Seconds before version cleanup and purge delete a data file that no version
+            references (a crashed writer's uncommitted file); a running writer may be about to
+            commit it. Default one hour.
         wal: Log every write to a local write-ahead log before acknowledging it, so buffered
             points, parameters and run changes survive a process crash.
         wal_sync: ``"none"``, ``"batch"`` (default, fsync about every 100 ms) or ``"always"``.
@@ -50,6 +53,7 @@ class Repo(_Repo):
         flush_rows=50_000,
         flush_interval=5.0,
         version_retention=7 * 24 * 3600.0,
+        orphan_grace=3600.0,
         wal=True,
         wal_sync="batch",
         wal_dir=None,

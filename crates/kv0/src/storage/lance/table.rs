@@ -407,8 +407,8 @@ impl Table for LanceTable {
         .boxed()
     }
 
-    fn cleanup(&self, before: chrono::DateTime<chrono::Utc>) -> BoxFuture<'_, Result<(u64, u64)>> {
-        super::cleanup(&self.ds, before).boxed()
+    fn cleanup(&self, c: crate::storage::Cleanup) -> BoxFuture<'_, Result<(u64, u64)>> {
+        super::cleanup(&self.ds, c.before).boxed()
     }
 
     fn tags(&self) -> BoxFuture<'_, Result<Vec<(String, u64)>>> {

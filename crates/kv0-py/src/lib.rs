@@ -190,6 +190,9 @@ fn kv_options(
         if s.hasattr("version_retention")? {
             o.version_retention = seconds(attr(s, "version_retention")?);
         }
+        if let Some(v) = attr::<f64>(s, "orphan_grace")? {
+            o.orphan_grace = Duration::from_secs_f64(v.max(0.0));
+        }
         if let Some(v) = attr::<bool>(s, "wal")? {
             o.wal = v;
         }
@@ -709,7 +712,7 @@ struct PyRepo {
 #[pymethods]
 impl PyRepo {
     #[new]
-    #[pyo3(signature = (uri, storage_options=None, create_if_missing=true, flush_rows=50_000, flush_interval=5.0, version_retention=604_800.0, wal=true, wal_sync="batch", wal_dir=None, replay_stale_wal=false, legacy_records="error"))]
+    #[pyo3(signature = (uri, storage_options=None, create_if_missing=true, flush_rows=50_000, flush_interval=5.0, version_retention=604_800.0, orphan_grace=3_600.0, wal=true, wal_sync="batch", wal_dir=None, replay_stale_wal=false, legacy_records="error"))]
     #[allow(clippy::too_many_arguments)] // mirrors the Python signature
     fn new(
         py: Python<'_>,
@@ -719,6 +722,7 @@ impl PyRepo {
         flush_rows: usize,
         flush_interval: Option<f64>,
         version_retention: Option<f64>,
+        orphan_grace: f64,
         wal: bool,
         wal_sync: &str,
         wal_dir: Option<std::path::PathBuf>,
@@ -745,6 +749,7 @@ impl PyRepo {
             flush_rows: flush_rows.max(1),
             flush_interval: seconds(flush_interval),
             version_retention: seconds(version_retention),
+            orphan_grace: Duration::from_secs_f64(orphan_grace.max(0.0)),
             wal,
             wal_sync: WalSync::parse(wal_sync).map_err(err)?,
             wal_dir,

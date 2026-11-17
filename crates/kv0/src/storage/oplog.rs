@@ -110,9 +110,16 @@ pub(crate) trait OpLog: Send + Sync + 'static {
     /// Every version still stored, oldest first.
     fn versions(&self) -> BoxFuture<'_, Result<Vec<VersionInfo>>>;
 
-    /// Removes versions committed before `before` and the files only they use. The latest
-    /// version and tagged versions are kept. Returns (versions, bytes) removed.
-    fn cleanup(&self, before: chrono::DateTime<chrono::Utc>) -> BoxFuture<'_, Result<(u64, u64)>>;
+    /// Removes versions committed before `c.before` and the files only they use (see
+    /// [`crate::storage::Cleanup`]). The latest version and tagged versions are kept. Returns
+    /// (versions, bytes) removed.
+    fn cleanup(&self, c: crate::storage::Cleanup) -> BoxFuture<'_, Result<(u64, u64)>>;
+
+    /// Whether kv0 must run version cleanup itself (every few commits); `false` when the
+    /// engine cleans up on its own (Lance's automatic cleanup, configured at creation).
+    fn needs_cleanup_cadence(&self) -> bool {
+        false
+    }
 
     /// Tags and the versions they name, in no particular order.
     fn tags(&self) -> BoxFuture<'_, Result<Vec<(String, u64)>>>;

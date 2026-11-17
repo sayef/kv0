@@ -66,3 +66,53 @@ pub(crate) fn non_empty(options: &StorageOptions) -> StorageOptions {
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect()
 }
+
+/// What a version cleanup removes.
+#[derive(Clone, Copy, Debug)]
+// Lance reads only `before`.
+#[cfg_attr(not(feature = "delta"), allow(dead_code))]
+pub(crate) struct Cleanup {
+    /// Versions committed before this are removed; the latest and tagged versions stay.
+    pub before: chrono::DateTime<chrono::Utc>,
+    /// Files that no version references are removed only once they are older than this: a
+    /// writer may still be about to commit them. Engines that track every file they write
+    /// (Lance) ignore it.
+    pub orphan_grace: std::time::Duration,
+    /// Erasure (purge): also remove every file a removed version referenced, however recently
+    /// it was written or dropped.
+    pub erase: bool,
+}
+
+impl Cleanup {
+    /// Removes versions committed before `before`.
+    pub(crate) fn before(
+        before: chrono::DateTime<chrono::Utc>,
+        orphan_grace: std::time::Duration,
+    ) -> Cleanup {
+        Cleanup {
+            before,
+            orphan_grace,
+            erase: false,
+        }
+    }
+
+    /// Removes every version but the latest and tagged ones, and the data only they hold.
+    pub(crate) fn erase(orphan_grace: std::time::Duration) -> Cleanup {
+        Cleanup {
+            before: chrono::Utc::now() + chrono::Duration::seconds(1),
+            orphan_grace,
+            erase: true,
+        }
+    }
+}
+
+/// A jittered exponential backoff for attempt `attempt` (from 1): about `base` ms doubled per
+/// attempt, at most `max` ms, scaled by a random factor in [0.5, 1).
+pub(crate) fn backoff(attempt: u32, base: u64, max: u64) -> std::time::Duration {
+    use std::hash::{BuildHasher, Hasher};
+    let ms = base.saturating_mul(1 << attempt.min(16)).min(max);
+    let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+    h.write_u32(attempt);
+    let jitter = (h.finish() % 1000) as f64 / 1000.0;
+    std::time::Duration::from_millis((ms as f64 * (0.5 + jitter / 2.0)) as u64)
+}

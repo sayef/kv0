@@ -535,8 +535,12 @@ impl OpLog for DeltaLog {
         table::versions(&self.table).boxed()
     }
 
-    fn cleanup(&self, before: chrono::DateTime<chrono::Utc>) -> BoxFuture<'_, Result<(u64, u64)>> {
-        table::cleanup(&self.table, before).boxed()
+    fn cleanup(&self, c: crate::storage::Cleanup) -> BoxFuture<'_, Result<(u64, u64)>> {
+        table::cleanup(&self.table, c).boxed()
+    }
+
+    fn needs_cleanup_cadence(&self) -> bool {
+        true
     }
 
     fn tags(&self) -> BoxFuture<'_, Result<Vec<(String, u64)>>> {

@@ -137,6 +137,7 @@ class Repo:
         flush_rows: int = ...,
         flush_interval: float | None = ...,
         version_retention: float | None = ...,
+        orphan_grace: float = ...,
         wal: bool = ...,
         wal_sync: str = ...,
         wal_dir: Any = ...,
