@@ -157,16 +157,17 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
         python: ["3.11", "3.13"]
+        backend: [lance]
         include:
           # The Python suite again on the Delta Lake engine (key-value and tracking).
           - os: ubuntu-latest
             python: "3.13"
             backend: delta
             features: --features delta
-    name: python (${{ matrix.os }}, ${{ matrix.python }}${{ matrix.backend && format(', {0}', matrix.backend) || '' }})
+    name: python (${{ matrix.os }}, ${{ matrix.python }}${{ matrix.backend == 'delta' && ', delta' || '' }})
     runs-on: ${{ matrix.os }}
     env:
-      KV0_TEST_BACKEND: ${{ matrix.backend || 'lance' }}
+      KV0_TEST_BACKEND: ${{ matrix.backend }}
     # Fails a hung run instead of holding the runner for the default six hours.
     timeout-minutes: 60
     steps:
