@@ -484,6 +484,9 @@ struct Core {
     tombstones_read: parking_lot::Mutex<HashSet<FileId>>,
     /// When a flush last checked for a newer version of `runs`.
     tombstones_checked: parking_lot::Mutex<Option<Instant>>,
+    /// The version of `runs` whose tombstones were all read, for engines that do not list a
+    /// version's files.
+    tombstones_version: parking_lot::Mutex<Option<u64>>,
     /// Held only by tasks on the kv0 runtime (see [`rt::spawn`]).
     tables: tokio::sync::Mutex<Tables>,
     /// Lock order: `tables`, then `buffers`, then `wal`.
@@ -752,6 +755,34 @@ fn metrics_batch(b: &Buffers) -> Result<RecordBatch> {
     )?)
 }
 
+/// `b` (metrics rows) with the run of each row's series in a leading `run_id` column. A
+/// statistics row's series is in `step`.
+fn with_runs(b: &RecordBatch, run_of: &HashMap<u64, String>) -> Result<RecordBatch> {
+    let id = col::<Int64Array>(b, "series_id")?;
+    let step = col::<Int64Array>(b, "step")?;
+    let runs: StringArray = (0..b.num_rows())
+        .map(|i| {
+            let sid = match id.value(i) {
+                0 => step.value(i),
+                s => s,
+            };
+            Some(run_of.get(&series_from_i64(sid)).map_or("", String::as_str))
+        })
+        .collect();
+    let mut fields = vec![Arc::new(arrow_schema::Field::new(
+        "run_id",
+        arrow_schema::DataType::Utf8,
+        false,
+    ))];
+    fields.extend(b.schema().fields().iter().cloned());
+    let mut cols: Vec<arrow_array::ArrayRef> = vec![Arc::new(runs)];
+    cols.extend(b.columns().iter().cloned());
+    Ok(RecordBatch::try_new(
+        Arc::new(arrow_schema::Schema::new(fields)),
+        cols,
+    )?)
+}
+
 /// Reserved metrics rows holding statistics deltas: `series_id` 0, the series in `step`.
 fn deltas_batch(deltas: &[(u64, stats::Delta)]) -> Result<RecordBatch> {
     let n = deltas.len();
@@ -831,11 +862,15 @@ pub(crate) fn writer_hash(writer: &str) -> i64 {
 /// With a WAL writer, each table's commit also holds a mark: the writer has committed every
 /// write of that table's kind up to sequence number `upto`. An engine that keeps marks itself
 /// commits it with the rows ([`tbl::Table::keeps_marks`]); otherwise it is a mark row.
+///
+/// Where `metrics` has a `run_id` column (the moraine engine), points and statistics rows carry
+/// the run of their series, from `run_of` (empty when unknown).
 async fn write_all(
     t: &mut Tables,
     left: &mut Buffers,
     mark: Option<(&str, u64)>,
     deltas: &[(u64, stats::Delta)],
+    run_of: &HashMap<u64, String>,
 ) -> Result<()> {
     let engine_mark = mark.map(|(w, upto)| WriterMark {
         writer: w.to_string(),
@@ -918,6 +953,12 @@ async fn write_all(
         let mut batches = vec![metrics_batch(&pts)?];
         if !deltas.is_empty() {
             batches.push(deltas_batch(deltas)?);
+        }
+        if t.metrics.has_column("run_id") {
+            batches = batches
+                .iter()
+                .map(|b| with_runs(b, run_of))
+                .collect::<Result<_>>()?;
         }
         t.metrics.append(batches, engine_mark).await?;
         left.relogged.clear();
@@ -1666,7 +1707,19 @@ impl Core {
             let mark = match w.as_mut() {
                 Some(w) => {
                     w.rotate()?;
-                    Some((w.writer_id().to_string(), b.clock.last()))
+                    // Only statistics to write (no logged rows): a sequence number of their
+                    // own, so an engine that applies each mark once does not take them for a
+                    // replay of the previous flush.
+                    let logged = !(b.runs.is_empty()
+                        && b.params.is_empty()
+                        && b.series.is_empty()
+                        && b.series_ids.is_empty());
+                    let upto = if logged {
+                        b.clock.last()
+                    } else {
+                        b.clock.next()
+                    };
+                    Some((w.writer_id().to_string(), upto))
                 }
                 None => None,
             };
@@ -1688,7 +1741,7 @@ impl Core {
         };
         // Writes to runs deleted elsewhere are dropped here (their WAL records with the segment).
         let r = match self.drop_deleted(&mut t, &mut taken).await {
-            Ok(()) => {
+            Ok(run_of) => {
                 let seq = mark
                     .as_ref()
                     .map_or_else(|| self.buffers.lock().clock.last(), |m| m.1);
@@ -1708,6 +1761,7 @@ impl Core {
                     &mut taken,
                     mark.as_ref().map(|(w, s)| (w.as_str(), *s)),
                     &deltas,
+                    &run_of,
                 )
                 .await;
                 // Exactly one version later: the new files are this flush's own, which hold no
@@ -1762,9 +1816,28 @@ impl Core {
         if due {
             runs.latest().await?;
         }
+        let files = runs.files();
+        if files.is_empty() {
+            // No file list (moraine): every tombstone, once per version.
+            let v = runs.version();
+            if *self.tombstones_version.lock() != Some(v) {
+                let scan = Scan::filter(Pred::eq("fields", fields::DELETED as i32))
+                    .columns(&["run_id", "fields"]);
+                let batches = runs.scan(scan).await?;
+                let mut dead = self.deleted.lock();
+                for b in &batches {
+                    let id = col::<StringArray>(b, "run_id")?;
+                    for i in 0..b.num_rows() {
+                        dead.insert(id.value(i).to_string());
+                    }
+                }
+                *self.tombstones_version.lock() = Some(v);
+            }
+            return Ok(self.deleted.lock().clone());
+        }
         let new: Vec<FileId> = {
             let seen = self.tombstones_read.lock();
-            runs.files()
+            files
                 .into_iter()
                 .map(|f| f.id)
                 .filter(|id| !seen.contains(id))
@@ -1788,8 +1861,9 @@ impl Core {
     }
 
     /// Removes from `b` every write to a deleted run, so a writer that keeps going after its
-    /// run was deleted (or a WAL replayed after it) does not bring the run back.
-    async fn drop_deleted(&self, t: &mut Tables, b: &mut Buffers) -> Result<()> {
+    /// run was deleted (or a WAL replayed after it) does not bring the run back. Returns the
+    /// run of every series with points or statistics in `b`, where one is known.
+    async fn drop_deleted(&self, t: &mut Tables, b: &mut Buffers) -> Result<HashMap<u64, String>> {
         let dead = self.tombstones(&mut t.runs, false).await?;
         // The run of each point's series: known to this handle, new in this flush, or stored.
         let mut run_of: HashMap<u64, String> = b
@@ -1800,7 +1874,7 @@ impl Core {
         let mut unknown: HashSet<u64> = HashSet::new();
         {
             let known = self.known_series.lock();
-            for sid in &b.series_ids {
+            for sid in b.series_ids.iter().chain(&b.relogged) {
                 if run_of.contains_key(sid) {
                     continue;
                 }
@@ -1829,7 +1903,7 @@ impl Core {
         // A point whose series is nowhere belongs to a run deleted with its series.
         let gone = |sid: &u64| run_of.get(sid).is_none_or(|r| dead.contains(r));
         if dead.is_empty() && !b.series_ids.iter().any(gone) {
-            return Ok(());
+            return Ok(run_of);
         }
         let mut dropped: HashSet<String> = HashSet::new();
         b.runs.retain(|r| {
@@ -1871,7 +1945,7 @@ impl Core {
         if !dropped.is_empty() {
             tracing::warn!(uri = %self.uri, runs = ?dropped, "kv0: dropped writes to deleted runs");
         }
-        Ok(())
+        Ok(run_of)
     }
 
     /// Fails when `run_id` is known to be deleted.
@@ -2734,6 +2808,7 @@ impl Repo {
             deleted: parking_lot::Mutex::new(HashSet::new()),
             tombstones_read: parking_lot::Mutex::new(HashSet::new()),
             tombstones_checked: parking_lot::Mutex::new(None),
+            tombstones_version: parking_lot::Mutex::new(None),
             opts,
         });
         let _ = core.me.set(Arc::downgrade(&core));
