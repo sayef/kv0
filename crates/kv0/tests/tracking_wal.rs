@@ -8,10 +8,24 @@ use kv0::rt::block_on;
 use kv0::tracking::{NewRun, Repo, RepoOptions, StepRange, Track};
 use serde_json::json;
 
-/// Metric mark rows a flush with a WAL leaves: one on Lance; none on Delta, which keeps marks
-/// as `txn` actions.
+/// Whether the engine under test has maintenance (optimize, version cleanup, background
+/// compaction) and tags. The moraine engine gets them with moraine's maintenance and version
+/// pins; until then the tests of those features are skipped there.
+fn maintains(test: &str) -> bool {
+    let yes = std::env::var("KV0_TEST_BACKEND").as_deref() != Ok("moraine");
+    if !yes {
+        eprintln!("{test}: skipped on moraine, which has no maintenance or tags yet");
+    }
+    yes
+}
+
+/// Metric mark rows a flush with a WAL leaves: one on Lance; none on Delta and moraine, which
+/// keep marks as `txn` actions.
 fn mark_rows() -> usize {
-    usize::from(std::env::var("KV0_TEST_BACKEND").as_deref() != Ok("delta"))
+    usize::from(!matches!(
+        std::env::var("KV0_TEST_BACKEND").as_deref(),
+        Ok("delta" | "moraine")
+    ))
 }
 
 fn opts(wal: &Path) -> RepoOptions {
@@ -235,6 +249,9 @@ fn replay_after_commit_before_truncate_is_idempotent() {
 
 #[test]
 fn replay_is_idempotent_after_every_old_version_is_cleaned_up() {
+    if !maintains("replay_is_idempotent_after_every_old_version_is_cleaned_up") {
+        return;
+    }
     crash_between_commit_and_truncate(true);
 }
 
@@ -279,6 +296,9 @@ fn automatic_step_past_the_largest_is_an_error() {
 
 #[test]
 fn optimize_keeps_one_mark_per_writer() {
+    if !maintains("optimize_keeps_one_mark_per_writer") {
+        return;
+    }
     let (_d, uri, wal) = setup();
     let repo = open(&uri, &wal);
     let run = repo
@@ -324,6 +344,9 @@ fn flush_and_settle(repo: &Repo) {
 
 #[test]
 fn automatic_compaction_bounds_fragments_and_marks() {
+    if !maintains("automatic_compaction_bounds_fragments_and_marks") {
+        return;
+    }
     let (_d, uri, wal) = setup();
     let repo = open_with(
         &uri,
@@ -353,6 +376,9 @@ fn automatic_compaction_bounds_fragments_and_marks() {
 
 #[test]
 fn settled_fragments_do_not_trigger_compaction() {
+    if !maintains("settled_fragments_do_not_trigger_compaction") {
+        return;
+    }
     // Review N5: fragments at the compaction target never merge further, so they must not
     // count toward max_fragments, or every flush would rescan and recompact.
     let (_d, uri, wal) = setup();
@@ -401,6 +427,9 @@ fn settled_fragments_do_not_trigger_compaction() {
 
 #[test]
 fn a_panicking_maintenance_does_not_stop_later_maintenance() {
+    if !maintains("a_panicking_maintenance_does_not_stop_later_maintenance") {
+        return;
+    }
     // Review N8: a panic must clear the in-progress flag, or no maintenance runs again.
     let (_d, uri, wal) = setup();
     let repo = open_with(
@@ -472,6 +501,9 @@ fn marks_are_pruned_soon_after_open() {
 
 #[test]
 fn close_waits_for_running_maintenance() {
+    if !maintains("close_waits_for_running_maintenance") {
+        return;
+    }
     let (_d, uri, wal) = setup();
     let repo = open_with(
         &uri,

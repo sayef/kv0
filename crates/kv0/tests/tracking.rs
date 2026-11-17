@@ -88,13 +88,15 @@ async fn runs_params_and_metrics_round_trip() {
     assert_eq!(acc.steps, (10..20).collect::<Vec<_>>());
     assert_eq!(acc.epochs[0], Some(1));
 
-    // The index does not change results.
-    repo.optimize().await.unwrap();
-    let again = repo
-        .read_metric(&run.id(), "loss", &json!({}), StepRange::default())
-        .await
-        .unwrap();
-    assert_eq!(again, loss);
+    // The index does not change results (on engines with maintenance; moraine has none yet).
+    if std::env::var("KV0_TEST_BACKEND").as_deref() != Ok("moraine") {
+        repo.optimize().await.unwrap();
+        let again = repo
+            .read_metric(&run.id(), "loss", &json!({}), StepRange::default())
+            .await
+            .unwrap();
+        assert_eq!(again, loss);
+    }
     repo.close().await.unwrap();
 
     // A second handle sees everything and resumes step numbering.

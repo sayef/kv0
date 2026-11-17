@@ -67,6 +67,10 @@ const LIMIT: Duration = Duration::from_secs(180);
 
 #[test]
 fn kv_concurrent_writers_on_s3() {
+    if std::env::var("KV0_TEST_BACKEND").as_deref() == Ok("moraine") {
+        eprintln!("skipped: the moraine engine holds no key-value databases yet");
+        return;
+    }
     let Some((prefix, so)) = storage() else {
         eprintln!("skipped: KV0_TEST_S3_ENDPOINT is not set");
         return;
@@ -128,7 +132,12 @@ fn tracking(prefix: String, so: HashMap<String, String>) {
         for i in 0..1000 {
             run.track("loss", i as f64, Track::default()).unwrap();
         }
-        repo.optimize().await.unwrap();
+        // The moraine engine has no maintenance yet; a flush writes the points there.
+        if std::env::var("KV0_TEST_BACKEND").as_deref() == Ok("moraine") {
+            repo.flush().await.unwrap();
+        } else {
+            repo.optimize().await.unwrap();
+        }
         let d = repo
             .read_metric(
                 &run.id(),
