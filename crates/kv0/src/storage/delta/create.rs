@@ -35,10 +35,7 @@ pub(crate) async fn open(
 ) -> Result<DeltaTable> {
     let mut t = table::handle_in(uri, options, store)?;
     if t.verify_deltatable_existence().await? {
-        match version {
-            Some(v) => t.load_version(v).await?,
-            None => t.load().await?,
-        }
+        t = table::load_at(t.log_store(), version).await?;
     } else {
         let Some(spec) = create.filter(|_| version.is_none()) else {
             return Err(Error::NotFound(format!("no kv0 table at {uri}")));
@@ -59,9 +56,8 @@ pub(crate) async fn open(
             Ok(t) => t,
             Err(e) => {
                 // Another creator won; open its table. Any other failure is reported as is.
-                let mut again = DeltaTable::new(t.log_store());
-                match again.load().await {
-                    Ok(()) => again,
+                match table::load_at(t.log_store(), None).await {
+                    Ok(again) => again,
                     Err(_) => return Err(e.into()),
                 }
             }
@@ -81,6 +77,46 @@ async fn check(t: &DeltaTable, uri: &str) -> Result<()> {
             "{uri} uses Delta reader features kv0 does not implement (reader version {})",
             p.min_reader_version()
         )));
+    }
+    // Writer versions 3 to 6 bring check constraints, change data feed, generated columns,
+    // column mapping and identity columns, which kv0's writes would not honour. Version 7 lists
+    // its features; only those kv0 can live with pass.
+    let writer = serde_json::to_value(p)?;
+    let unknown: Vec<String> = match p.min_writer_version() {
+        ..=2 => Vec::new(),
+        7 => writer
+            .get("writerFeatures")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+            .filter(|f| !["appendOnly", "invariants"].contains(f))
+            .map(str::to_string)
+            .collect(),
+        v => vec![format!("writer version {v}")],
+    };
+    if !unknown.is_empty() {
+        return Err(Error::NotSupported(format!(
+            "{uri} uses Delta writer features kv0 does not implement: {}",
+            unknown.join(", ")
+        )));
+    }
+    let config = snap.metadata().configuration();
+    for (key, why) in [
+        (
+            "delta.enableChangeDataFeed",
+            "kv0 rewrites files without recording changes",
+        ),
+        ("delta.appendOnly", "kv0 compacts and deletes"),
+    ] {
+        if config
+            .get(key)
+            .is_some_and(|v| v.eq_ignore_ascii_case("true"))
+        {
+            return Err(Error::NotSupported(format!(
+                "{uri} sets {key}, which kv0 cannot honour ({why})"
+            )));
+        }
     }
     if snap.version() >= 1 {
         static CHECKED: Mutex<Option<HashSet<String>>> = Mutex::new(None);

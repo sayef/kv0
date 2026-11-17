@@ -27,6 +27,9 @@ pub mod kv;
 pub mod purge;
 pub mod rt;
 pub mod storage;
+#[cfg(feature = "delta")]
+#[doc(hidden)]
+pub mod testing;
 
 pub use error::{Error, Result};
 pub use purge::PurgeReport;

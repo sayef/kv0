@@ -387,8 +387,7 @@ impl OpLog for DeltaLog {
                 Err(e) => {
                     // A commit whose response was lost may have landed: its mark says so.
                     let Some(m) = &mark else { return Err(e) };
-                    let mut latest = DeltaTable::new(this.table.log_store());
-                    latest.load().await?;
+                    let latest = table::load_at(this.table.log_store(), None).await?;
                     let app = commit::wal_app_id(&m.writer);
                     let have = latest
                         .snapshot()?
@@ -398,6 +397,10 @@ impl OpLog for DeltaLog {
                         tracing::debug!(uri = %this.shared.uri, error = %e, "kv0: the append was committed after all");
                         return this.wrap(latest, None);
                     }
+                    // Not committed, and never will be: the next flush writes the operations
+                    // again, so this file only holds data a purge would miss.
+                    let adds: Vec<_> = files.iter().map(|f| f.add.clone()).collect();
+                    commit::discard(&this.table, &adds).await;
                     return Err(e);
                 }
             };
@@ -501,8 +504,7 @@ impl OpLog for DeltaLog {
 
     fn checkout(&self, version: u64) -> BoxFuture<'_, Result<Log>> {
         async move {
-            let mut t = DeltaTable::new(self.table.log_store());
-            t.load_version(version).await?;
+            let t = table::load_at(self.table.log_store(), Some(version)).await?;
             self.wrap(t, None)
         }
         .boxed()
@@ -520,8 +522,7 @@ impl OpLog for DeltaLog {
             };
             if let Err(e) = moved {
                 tracing::debug!(uri = %self.shared.uri, error = %e, "kv0: reloading the log from its checkpoint");
-                t = DeltaTable::new(self.table.log_store());
-                t.load().await?;
+                t = table::load_at(self.table.log_store(), None).await?;
                 if t.version() <= self.table.version() {
                     return Ok(None);
                 }

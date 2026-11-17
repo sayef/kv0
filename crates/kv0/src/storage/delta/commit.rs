@@ -17,6 +17,10 @@ use deltalake_core::protocol::{DeltaOperation, SaveMode};
 use deltalake_core::writer::{DeltaWriter, RecordBatchWriter};
 use deltalake_core::{DeltaTable, Path};
 
+use std::collections::HashSet;
+
+use deltalake_core::logstore::object_store::ObjectStoreExt;
+
 use crate::error::{Error, Result};
 
 const MAX_RETRIES: usize = 64;
@@ -54,20 +58,71 @@ fn properties(op: &str, blind_append: bool, txn: Option<Transaction>) -> CommitP
 }
 
 /// Commits `actions` on top of `table`'s version and returns the table at the new version.
+///
+/// delta-rs checks a commit against every commit since its read version, so it fails when a
+/// cleanup or purge deleted those commit files meanwhile. A blind append (`rebase`) does not
+/// depend on what it read: it is committed again on the latest version. Any other commit
+/// fails with [`Error::Conflict`], which makes rewrites plan again on the latest version.
 async fn commit(
     table: &DeltaTable,
     actions: Vec<Action>,
     operation: DeltaOperation,
     props: CommitProperties,
+    rebase: bool,
 ) -> Result<DeltaTable> {
-    let fin = CommitBuilder::from(props)
-        .with_actions(actions)
-        .build(Some(table.snapshot()?), table.log_store(), operation)
-        .await?;
-    let mut t = table.clone();
-    t.state = Some(fin.snapshot());
-    if t.version() != Some(fin.version()) {
-        t.update_incremental(Some(fin.version())).await?;
+    // The commit file is written when the prepared commit completes; what follows (loading the
+    // new version, writing a checkpoint every 100 commits) can fail although the commit
+    // landed. Reporting that as a failed commit would make callers write it again, so the new
+    // version is loaded here instead.
+    let mut base = table.clone();
+    let mut attempt = 0;
+    let post = loop {
+        let prepared = CommitBuilder::from(props.clone())
+            .with_actions(actions.clone())
+            .build(Some(base.snapshot()?), base.log_store(), operation.clone())
+            .into_prepared_commit_future()
+            .await;
+        let e = match prepared {
+            Ok(p) => match p.await {
+                Ok(post) => break post,
+                Err(e) => e,
+            },
+            Err(e) => e,
+        };
+        if !super::table::log_cut(&e) {
+            return Err(e.into());
+        }
+        if !rebase || attempt >= 4 {
+            return Err(Error::Conflict(format!(
+                "commits after version {} were cleaned up meanwhile: {e}",
+                base.version().unwrap_or(0)
+            )));
+        }
+        attempt += 1;
+        tracing::debug!(error = %e, attempt, "kv0: the log moved past a cleanup; committing on the latest version");
+        base = super::table::load_at(table.log_store(), None).await?;
+    };
+    let version = post.version;
+    let mut t = base;
+    match post.await {
+        Ok(fin) => t.state = Some(fin.snapshot()),
+        Err(e) => {
+            tracing::debug!(version, error = %e, "kv0: after a commit landed, loading it or checkpointing failed");
+        }
+    }
+    if t.version() != Some(version) {
+        let mut attempt = 0;
+        loop {
+            match t.update_incremental(Some(version)).await {
+                Ok(()) => break,
+                Err(e) if attempt < 8 => {
+                    attempt += 1;
+                    tracing::debug!(version, attempt, error = %e, "kv0: loading a committed version failed; again");
+                    tokio::time::sleep(crate::storage::backoff(attempt, 50, 2_000)).await;
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
     }
     Ok(t)
 }
@@ -87,6 +142,7 @@ pub(crate) async fn append(
             predicate: None,
         },
         properties("flush", true, txn),
+        true,
     )
     .await
 }
@@ -107,6 +163,7 @@ pub(crate) async fn rewrite(
         .map(|f| Action::Remove(f.remove_action(false)))
         .collect();
     if actions.len() != removed.len() {
+        discard(table, &adds).await;
         return Err(Error::Corruption(format!(
             "{} of the {} files to replace are not in version {}",
             removed.len() - actions.len(),
@@ -114,11 +171,12 @@ pub(crate) async fn rewrite(
             snap.version()
         )));
     }
+    let added: Vec<Add> = adds.clone();
     actions.extend(adds.into_iter().map(|mut a| {
         a.data_change = false;
         Action::Add(a)
     }));
-    commit(
+    let r = commit(
         table,
         actions,
         DeltaOperation::Optimize {
@@ -126,8 +184,49 @@ pub(crate) async fn rewrite(
             target_size: 0,
         },
         properties(op, false, None),
+        false,
     )
-    .await
+    .await;
+    let Err(Error::Conflict(m)) = r else {
+        return r;
+    };
+    // A conflict can be this very commit, written once already by a request whose response
+    // was lost: then the latest version holds its files. Otherwise nothing references the
+    // files written for it, and they go now rather than after the orphan grace period (a
+    // purge in between would miss the data they hold).
+    let latest = super::table::load_at(table.log_store(), None).await?;
+    let live: HashSet<String> = latest
+        .snapshot()?
+        .log_data()
+        .iter()
+        .map(|f| f.object_store_path().to_string())
+        .collect();
+    if added.iter().any(|a| live.contains(&decoded(&a.path))) {
+        tracing::debug!(error = %m, "kv0: the rewrite was committed after all");
+        return Ok(latest);
+    }
+    discard(table, &added).await;
+    Err(Error::Conflict(m))
+}
+
+/// The object-store path of an `Add` path (which is URL-encoded).
+fn decoded(path: &str) -> String {
+    Path::from_url_path(path)
+        .map(|p| p.to_string())
+        .unwrap_or_else(|_| path.to_string())
+}
+
+/// Deletes data files written for a commit that is known not to have landed, so no data
+/// outlives a purge in them. Failures are logged: cleanup takes the files after the orphan
+/// grace period.
+pub(crate) async fn discard(table: &DeltaTable, adds: &[Add]) {
+    let store = table.object_store();
+    for a in adds {
+        let path = Path::from(decoded(&a.path));
+        if let Err(e) = store.delete(&path).await {
+            tracing::debug!(path = %path, error = %e, "kv0: an uncommitted file stays until cleanup");
+        }
+    }
 }
 
 /// A file written and not yet committed.

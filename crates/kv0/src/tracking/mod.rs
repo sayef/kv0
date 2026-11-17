@@ -57,16 +57,29 @@ pub use json::canonical as canonical_context;
 /// Attempts of an `optimize` step that conflicts with another rewrite of the same files.
 const REPLAN_ATTEMPTS: u32 = 8;
 
+/// Whether an optimize step that failed with `e` should be planned again: a conflict, or a
+/// data file that went away.
+fn replannable(e: &Error) -> bool {
+    match e {
+        Error::Conflict(_) => true,
+        Error::NotFound(m) => m.contains(".parquet"),
+        _ => false,
+    }
+}
+
 /// Evaluates `$step` (which plans on the latest version and commits) again, after a jittered
-/// backoff, while it fails with [`Error::Conflict`], up to [`REPLAN_ATTEMPTS`] times.
+/// backoff, while it fails with [`Error::Conflict`] or a missing data file, up to
+/// [`REPLAN_ATTEMPTS`] times.
 macro_rules! replan {
     ($what:expr, $step:expr) => {{
         let mut attempt = 0u32;
         loop {
             match $step {
-                Err(Error::Conflict(m)) if attempt + 1 < REPLAN_ATTEMPTS => {
+                // Another rewrite took some of the same files first, or a purge removed files
+                // the plan read (they left the latest version a moment before).
+                Err(e) if attempt + 1 < REPLAN_ATTEMPTS && replannable(&e) => {
                     attempt += 1;
-                    tracing::debug!(step = $what, attempt, error = %m, "kv0: optimize conflicted; planning it again");
+                    tracing::debug!(step = $what, attempt, error = %e, "kv0: optimize conflicted; planning it again");
                     tokio::time::sleep(storage::backoff(attempt, 100, 5_000)).await;
                 }
                 r => break r,

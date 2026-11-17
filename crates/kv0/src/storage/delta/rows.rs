@@ -262,9 +262,7 @@ impl RowTable {
     }
 
     async fn load_latest(&self) -> Result<DeltaTable> {
-        let mut t = DeltaTable::new(self.table.log_store());
-        t.load().await?;
-        Ok(t)
+        table::load_at(self.table.log_store(), None).await
     }
 
     /// Files a scan reads: of `files`, those whose log statistics allow a match.
@@ -358,9 +356,18 @@ impl RowTable {
                     self.moved(t)?;
                     return Ok(removed.len());
                 }
-                Err(Error::Conflict(m)) if attempt + 1 < REWRITE_ATTEMPTS => {
+                // Another rewrite took some of the same files first, or a purge removed a file
+                // the plan read: plan again on the latest version.
+                Err(e)
+                    if attempt + 1 < REWRITE_ATTEMPTS
+                        && match &e {
+                            Error::Conflict(_) => true,
+                            Error::NotFound(m) => m.contains(".parquet"),
+                            _ => false,
+                        } =>
+                {
                     attempt += 1;
-                    tracing::debug!(uri = %self.shared.uri, attempt, error = %m, "kv0: rewrite conflicted; planning it again");
+                    tracing::debug!(uri = %self.shared.uri, attempt, error = %e, "kv0: rewrite conflicted; planning it again");
                     tokio::time::sleep(crate::storage::backoff(attempt, 100, 5_000)).await;
                     let t = self.load_latest().await?;
                     self.moved(t)?;
@@ -494,6 +501,10 @@ impl RowTable {
             }
             attempt += 1;
             if !matches!(err, Error::Conflict(_)) || attempt >= APPEND_ATTEMPTS {
+                // With a mark, the append is known not to have landed: its files go now.
+                if mark.is_some() {
+                    commit::discard(&self.table, &adds).await;
+                }
                 return Err(err);
             }
             tokio::time::sleep(crate::storage::backoff(attempt, 50, 800)).await;
@@ -764,8 +775,7 @@ impl Table for RowTable {
 
     fn checkout(&self, version: u64) -> BoxFuture<'_, Result<TableRef>> {
         async move {
-            let mut t = DeltaTable::new(self.table.log_store());
-            t.load_version(version).await?;
+            let t = table::load_at(self.table.log_store(), Some(version)).await?;
             self.at(t)
         }
         .boxed()
