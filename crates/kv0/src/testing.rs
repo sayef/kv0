@@ -43,6 +43,16 @@ pub struct Crash {
     pub after: bool,
 }
 
+/// Holds the `nth` operation (from 1) of one of `ops` on a path containing `path` for `millis`
+/// before it runs, so a test can act while that operation is in flight.
+#[derive(Clone, Debug)]
+pub struct Stall {
+    pub ops: Vec<StoreOp>,
+    pub path: String,
+    pub nth: u64,
+    pub millis: u64,
+}
+
 /// Faults injected into every Delta Lake table opened afterwards in this process.
 #[derive(Clone, Debug, Default)]
 pub struct Faults {
@@ -61,12 +71,19 @@ pub struct Faults {
     pub paths: Option<String>,
     /// Where to end the process, when set.
     pub crash: Option<Crash>,
+    /// Which operation to hold, when set.
+    pub stall: Option<Stall>,
 }
 
 /// Configures faults for this process (`None` stops them; tables opened since the first call
 /// stay wrapped and pass operations through).
 pub fn set_faults(faults: Option<Faults>) {
     crate::storage::delta::faults::set(faults);
+}
+
+/// Operations held by [`Faults::stall`] so far in this process (counted when the hold starts).
+pub fn stalls_entered() -> u64 {
+    crate::storage::delta::faults::stalls_entered()
 }
 
 /// Faults injected so far in this process.

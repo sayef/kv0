@@ -76,6 +76,7 @@ async fn commit(
     // version is loaded here instead.
     let mut base = table.clone();
     let mut attempt = 0;
+    let mut below = 0;
     let post = loop {
         let prepared = CommitBuilder::from(props.clone())
             .with_actions(actions.clone())
@@ -84,7 +85,24 @@ async fn commit(
             .await;
         let e = match prepared {
             Ok(p) => match p.await {
-                Ok(post) => break post,
+                Ok(post) => {
+                    // Checked before anything reads or checkpoints the new version.
+                    if !landed_below_checkpoint(&base, post.version, &actions).await {
+                        break post;
+                    }
+                    let version = post.version;
+                    drop(post);
+                    remove_commit_file(&base, version).await;
+                    if !rebase || below >= 4 {
+                        return Err(Error::Conflict(format!(
+                            "the commit file of version {version} landed below a newer checkpoint (a cleanup removed the commit it raced)"
+                        )));
+                    }
+                    below += 1;
+                    tracing::debug!(version, "kv0: a commit landed below a newer checkpoint; committing on the latest version");
+                    base = super::table::load_at(table.log_store(), None).await?;
+                    continue;
+                }
                 Err(e) => e,
             },
             Err(e) => e,
@@ -125,6 +143,82 @@ async fn commit(
         }
     }
     Ok(t)
+}
+
+/// Whether the commit file just written for `version` lies below a newer checkpoint, so no
+/// reader will ever see it.
+///
+/// delta-rs lists the log, then writes `latest + 1` if absent. If meanwhile two other commits
+/// land and a cleanup deletes the first of them (keeping a checkpoint at the second), the write
+/// recreates that commit file beneath the checkpoint: it succeeds and is invisible. Only then
+/// is there a checkpoint above `version` right after the commit, so one listing settles the
+/// common case; with such a checkpoint, the latest version is loaded and searched for the
+/// commit: its writer mark, or its files (live or removed since). When the check itself fails,
+/// the commit counts as visible, as it did before the check existed.
+async fn landed_below_checkpoint(table: &DeltaTable, version: u64, actions: &[Action]) -> bool {
+    match below_checkpoint(table, version, actions).await {
+        Ok(below) => below,
+        Err(e) => {
+            tracing::debug!(version, error = %e, "kv0: could not check a commit against newer checkpoints");
+            false
+        }
+    }
+}
+
+async fn below_checkpoint(table: &DeltaTable, version: u64, actions: &[Action]) -> Result<bool> {
+    if !super::table::checkpoint_above(table.object_store().as_ref(), version).await? {
+        return Ok(false);
+    }
+    let latest = super::table::load_at(table.log_store(), None).await?;
+    let state = latest.snapshot()?;
+    let log_store = latest.log_store();
+    for a in actions {
+        if let Action::Txn(t) = a {
+            let seen = state
+                .transaction_version(log_store.as_ref(), t.app_id.clone())
+                .await?;
+            return Ok(seen.is_none_or(|v| v < t.version));
+        }
+    }
+    let live: HashSet<String> = state
+        .log_data()
+        .iter()
+        .map(|f| f.object_store_path().to_string())
+        .collect();
+    let adds: Vec<String> = actions
+        .iter()
+        .filter_map(|a| match a {
+            Action::Add(a) => Some(decoded(&a.path)),
+            _ => None,
+        })
+        .collect();
+    if adds.is_empty() {
+        // A rewrite that only removes: it landed when its files are gone.
+        return Ok(actions.iter().any(|a| match a {
+            Action::Remove(r) => live.contains(&decoded(&r.path)),
+            _ => false,
+        }));
+    }
+    if adds.iter().any(|p| live.contains(p)) {
+        return Ok(false);
+    }
+    // Its files may have been rewritten since; then their removal is a tombstone.
+    let mut removed = state.all_tombstones(log_store.as_ref());
+    while let Some(t) = futures::TryStreamExt::try_next(&mut removed).await? {
+        if adds.contains(&decoded(&t.path())) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Deletes the commit file of `version`, which no reader sees (see
+/// [`landed_below_checkpoint`]), so listings of the log do not show it.
+async fn remove_commit_file(table: &DeltaTable, version: u64) {
+    let path = Path::from(format!("_delta_log/{version:020}.json"));
+    if let Err(e) = table.object_store().delete(&path).await {
+        tracing::debug!(version, error = %e, "kv0: an unreachable commit file stays until log cleanup");
+    }
 }
 
 /// Commits new files as a blind append, with the writer's mark when there is one.

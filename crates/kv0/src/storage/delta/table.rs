@@ -136,6 +136,22 @@ async fn log_files(store: &dyn ObjectStore) -> Result<LogFiles> {
     Ok(out)
 }
 
+/// Whether `_delta_log/` holds a checkpoint above `version` (one listing, from `version` on).
+pub(crate) async fn checkpoint_above(store: &dyn ObjectStore, version: u64) -> Result<bool> {
+    let prefix = Path::from("_delta_log");
+    // Names sort by version: everything after the commit file of `version` is newer.
+    let offset = Path::from(format!("_delta_log/{version:020}.json"));
+    let mut list = store.list_with_offset(Some(&prefix), &offset);
+    while let Some(m) = list.try_next().await? {
+        if let Some((v, LogEntry::Checkpoint)) = m.location.filename().and_then(parse_log_name) {
+            if v > version {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
 /// Every version still loadable, oldest first: those with a commit file, and tagged versions
 /// kept only as a checkpoint.
 pub(crate) async fn versions(table: &DeltaTable) -> Result<Vec<VersionInfo>> {
