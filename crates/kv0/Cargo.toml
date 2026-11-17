@@ -34,6 +34,17 @@ delta = [
     "dep:deltalake-azure",
     "dep:url",
     "dep:async-trait",
+    "dep:object_store",
+    "dep:arrow-schema-59",
+]
+# The moraine engine for the tracking layer, next to Lance and Delta, while it is built up. Off
+# by default; needs Rust 1.95 (moraine's minimum), like `delta`.
+# moraine brings its own S3 support, so `aws` needs nothing more for it.
+moraine = [
+    "dep:morainedb",
+    "dep:arrow-schema-59",
+    "dep:object_store",
+    "dep:async-trait",
 ]
 # `kv0 migrate`: converts locations written with the Lance engine (kv0 0.1.0-beta.2 and earlier)
 # to Delta Lake (`kv0::migrate`, and the `kv0` binary). Off by default.
@@ -54,6 +65,12 @@ deltalake-aws = { version = "=1.0.0", default-features = false, features = ["rus
 deltalake-gcp = { version = "=1.0.0", default-features = false, features = ["rustls"], optional = true }
 deltalake-azure = { version = "=1.0.0", default-features = false, features = ["rustls"], optional = true }
 url = { version = "2", optional = true }
+# moraine, from a local checkout of its main branch until it is published. Arrow 59 batches cross
+# to and from kv0's Arrow 58 as for Delta (storage/arrow_bridge.rs); its object_store version is
+# the one deltalake-core resolves to, so one fault-injecting store serves both engines.
+morainedb = { path = "../../../moraine-main/crates/moraine", optional = true }
+arrow-schema-59 = { package = "arrow-schema", version = "59", optional = true }
+object_store = { version = "0.13.2", default-features = false, features = ["aws", "fs"], optional = true }
 # Implementing delta-rs's ObjectStore trait (the fault-injecting store of the test hooks).
 async-trait = { version = "0.1", optional = true }
 # Filtering record batches (records folding).

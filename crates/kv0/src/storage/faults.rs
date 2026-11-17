@@ -13,13 +13,13 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use bytes::Bytes;
-use deltalake_core::logstore::object_store::{
-    self, CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta,
-    PutMultipartOptions, PutOptions, PutPayload, PutResult, RenameOptions,
-};
-use deltalake_core::{ObjectStore, Path};
 use futures::stream::BoxStream;
 use futures::StreamExt;
+use object_store::path::Path;
+use object_store::{
+    CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
+    PutMultipartOptions, PutOptions, PutPayload, PutResult, RenameOptions,
+};
 
 use crate::testing::{Crash, FaultKind, Faults, Stall, StoreOp};
 

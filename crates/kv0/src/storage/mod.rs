@@ -17,6 +17,8 @@ use crate::error::{Error, Result};
 pub(crate) mod arrow_bridge;
 #[cfg(feature = "delta")]
 pub(crate) mod delta;
+#[cfg(any(feature = "delta", feature = "moraine"))]
+pub(crate) mod faults;
 pub mod format;
 pub(crate) mod lance;
 pub(crate) mod oplog;

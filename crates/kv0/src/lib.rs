@@ -29,7 +29,7 @@ pub mod migrate;
 pub mod purge;
 pub mod rt;
 pub mod storage;
-#[cfg(feature = "delta")]
+#[cfg(any(feature = "delta", feature = "moraine"))]
 #[doc(hidden)]
 pub mod testing;
 

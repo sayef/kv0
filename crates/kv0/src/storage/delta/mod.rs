@@ -16,7 +16,7 @@
 
 pub(crate) mod commit;
 pub(crate) mod create;
-pub(crate) mod faults;
+pub(crate) use super::faults;
 pub(crate) mod filter;
 pub(crate) mod footer_cache;
 pub(crate) mod kv;
