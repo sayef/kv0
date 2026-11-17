@@ -32,7 +32,8 @@ kv0 writes a location with one of two storage engines:
 
 - **Lance** (the default for now): Lance datasets, the format of kv0 0.1.0-beta.2 and earlier.
 - **Delta Lake** (delta-rs, the `delta` cargo feature): Delta tables. It becomes the default in a
-  later release, which converts existing locations with `kv0 migrate`.
+  later release; existing locations are converted with `kv0 migrate` (see
+  [Migrating to Delta Lake](migration.md)).
 
 An existing location always opens with the engine it was written with. A new one uses the
 `engine` option (`"lance"` or `"delta"`), else the `KV0_ENGINE` environment variable, else Lance.
