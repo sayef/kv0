@@ -113,7 +113,8 @@ other writer, and Lance's cleanup never removes a file that no version reference
 7 days old, so a file a concurrent writer is about to commit is safe. (Such an unreferenced file,
 left by a writer that crashed before committing, is removed only by a cleanup after those 7 days.)
 With the Delta Lake engine (the `delta` feature) that age is `orphan_grace` (1 h): files a writer
-left less than that long before a purge are removed by a later cleanup. Files that a removed
+left less than that long before a purge are removed by a later cleanup (a writer deletes the files
+of a commit it knows did not land at once; a crash or an unanswered commit request leaves them). Files that a removed
 version committed are erased however recent they are. Readers that hold an
 older version lose it: a key-value handle reading a value whose file is gone refreshes and reads it
 again; a tracking query in flight may fail and should be retried. Run `purge` when a short burst of
