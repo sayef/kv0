@@ -98,6 +98,11 @@ pub struct Options {
     /// many entries, so the next open loads it and reads only newer fragments instead of the
     /// whole dataset. `usize::MAX` disables snapshots. Default 100 000.
     pub snapshot_min_entries: usize,
+    /// The storage engine of a database created here. An existing database always opens with
+    /// the engine it was written in; naming another one fails (a Lance database asked to open
+    /// with Delta Lake points to `kv0 migrate`). `None` uses `KV0_ENGINE` (`lance` or `delta`),
+    /// else Lance. Default `None`.
+    pub engine: Option<crate::storage::Engine>,
 }
 
 impl Default for Options {
@@ -122,6 +127,7 @@ impl Default for Options {
             lazy_value_threshold: 4096,
             value_cache_size: 64 << 20,
             snapshot_min_entries: 100_000,
+            engine: None,
         }
     }
 }
@@ -332,6 +338,7 @@ impl Db {
                     o.create_if_missing && !o.read_only,
                     o.version_retention,
                     o.mark_ttl,
+                    o.engine,
                 )
                 .await?;
                 match loaded {

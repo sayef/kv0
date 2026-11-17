@@ -133,6 +133,11 @@ pub struct RepoOptions {
     /// What to do when the repository still has the shared `records.lance` of builds before
     /// per-table records. Default [`LegacyRecords::Error`].
     pub legacy_records: LegacyRecords,
+    /// The storage engine of a repository created here. An existing repository always opens
+    /// with the engine it was written in; naming another one fails (a Lance repository asked
+    /// to open with Delta Lake points to `kv0 migrate`). `None` uses `KV0_ENGINE` (`lance` or
+    /// `delta`), else Lance. Default `None`.
+    pub engine: Option<crate::storage::Engine>,
 }
 
 /// Handling of the shared `records.lance` that builds before per-table records wrote.
@@ -164,6 +169,7 @@ impl Default for RepoOptions {
             compaction_target_rows: 1_000_000,
             mark_prune_interval: Duration::from_secs(3600),
             legacy_records: LegacyRecords::Error,
+            engine: None,
         }
     }
 }
@@ -2588,7 +2594,8 @@ impl Repo {
         let uri = storage::normalize_uri(location)?;
         let root = {
             let (u, o) = (uri.clone(), opts.storage_options.clone());
-            rt::spawn(async move { Root::open(&u, &o).await }).await?
+            let (create, engine) = (opts.create_if_missing, opts.engine);
+            rt::spawn(async move { Root::open(&u, &o, create, engine).await }).await?
         };
         if !root.is_delta() {
             let (u, o) = (uri.clone(), opts.storage_options.clone());
@@ -3785,7 +3792,7 @@ mod fold_tests {
                 ttl,
             )
             .await?;
-            let root = Root::open(&u, &o).await?;
+            let root = Root::open(&u, &o, true, None).await?;
             assert!(root.is_delta());
             let mut legacy = root
                 .table(

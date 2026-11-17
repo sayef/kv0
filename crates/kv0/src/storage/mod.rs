@@ -17,12 +17,14 @@ use crate::error::{Error, Result};
 pub(crate) mod arrow_bridge;
 #[cfg(feature = "delta")]
 pub(crate) mod delta;
+pub mod format;
 pub(crate) mod lance;
 pub(crate) mod oplog;
 pub(crate) mod pred;
 pub(crate) mod table;
 pub(crate) mod types;
 
+pub use self::format::{detect, Engine, Format};
 pub(crate) use self::lance::{list_dir, remove_dir};
 
 /// Object-store options passed through to Lance, such as `aws_endpoint` or `aws_region`.

@@ -476,3 +476,21 @@ def test_long_idle_writer_wal_is_not_mistaken_for_stale(tmp_path):
     r = kv0.DB(str(tmp_path / "db"), _opts(wal_dir=str(tmp_path / "wal"), mark_ttl=1))
     assert r.get(b"k2") == b"2"
     assert r.get(b"k1") == b"1"
+
+
+def test_engine_option_and_mismatch(tmp_path):
+    # A database created with Lance keeps it; asking for Delta Lake points to the migration.
+    path = str(tmp_path / "db")
+    db = kv0.DB(path, _opts(engine="lance"))
+    db.put(b"k", b"v")
+    db.close()
+    with pytest.raises(errors.NotSupported, match="kv0 migrate"):
+        kv0.DB(path, _opts(engine="delta"))
+    with pytest.raises(errors.InvalidArgument):
+        kv0.DB(str(tmp_path / "other"), _opts(engine="rocks"))
+    from kv0.tracking import Repo
+
+    repo_path = str(tmp_path / "repo")
+    Repo(repo_path, engine="lance", flush_interval=None).close()
+    with pytest.raises(errors.NotSupported, match="kv0 migrate"):
+        Repo(repo_path, engine="delta", flush_interval=None)

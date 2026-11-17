@@ -25,7 +25,7 @@ use url::Url;
 
 use crate::error::{Error, Result};
 use crate::kv::VersionInfo;
-use crate::storage::{is_local, non_empty, Cleanup, StorageOptions};
+use crate::storage::{non_empty, Cleanup, StorageOptions};
 
 /// The table URL of a location (a local path becomes a `file://` directory URL; nothing is
 /// created).
@@ -78,46 +78,6 @@ pub(crate) fn handle_in(
         b = b.with_storage_backend(super::faults::wrap(s), url);
     }
     Ok(b.build()?)
-}
-
-/// What a location holds.
-pub(crate) enum Layout {
-    Delta,
-    Lance,
-    None,
-}
-
-/// Whether `uri` holds a Delta table, a Lance dataset or neither (one listing).
-pub(crate) async fn layout(uri: &str, options: &StorageOptions) -> Result<Layout> {
-    if is_local(uri) {
-        let dir = std::path::Path::new(uri.strip_prefix("file://").unwrap_or(uri));
-        return Ok(if dir.join("_delta_log").is_dir() {
-            Layout::Delta
-        } else if dir.join("_versions").is_dir() {
-            Layout::Lance
-        } else {
-            Layout::None
-        });
-    }
-    let store = handle(uri, options)?.object_store();
-    let listed = match store.list_with_delimiter(None).await {
-        Ok(l) => l,
-        Err(ObjectStoreError::NotFound { .. }) => return Ok(Layout::None),
-        Err(e) => return Err(e.into()),
-    };
-    let has = |name: &str| {
-        listed
-            .common_prefixes
-            .iter()
-            .any(|p| p.filename() == Some(name))
-    };
-    Ok(if has("_delta_log") {
-        Layout::Delta
-    } else if has("_versions") {
-        Layout::Lance
-    } else {
-        Layout::None
-    })
 }
 
 /// A file of `_delta_log/`.
@@ -174,6 +134,22 @@ async fn log_files(store: &dyn ObjectStore) -> Result<LogFiles> {
         out.all.push((v, m.location.clone()));
     }
     Ok(out)
+}
+
+/// Whether `_delta_log/` holds a checkpoint above `version` (one listing, from `version` on).
+pub(crate) async fn checkpoint_above(store: &dyn ObjectStore, version: u64) -> Result<bool> {
+    let prefix = Path::from("_delta_log");
+    // Names sort by version: everything after the commit file of `version` is newer.
+    let offset = Path::from(format!("_delta_log/{version:020}.json"));
+    let mut list = store.list_with_offset(Some(&prefix), &offset);
+    while let Some(m) = list.try_next().await? {
+        if let Some((v, LogEntry::Checkpoint)) = m.location.filename().and_then(parse_log_name) {
+            if v > version {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
 
 /// Every version still loadable, oldest first: those with a commit file, and tagged versions

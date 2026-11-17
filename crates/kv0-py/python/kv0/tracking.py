@@ -43,6 +43,9 @@ class Repo(_Repo):
         legacy_records: ``"error"`` (default) refuses a repository that still has the shared
             ``records.lance`` of earlier builds; ``"allow"`` opens it, so ``legacy_records()``
             can read the old rows for a migration and ``drop_legacy_records()`` remove them.
+        engine: Storage engine of a repository created here, ``"lance"`` or ``"delta"``; an
+            existing repository always opens with its own engine, and naming another one fails.
+            ``None`` (default) uses ``KV0_ENGINE``, else Lance.
     """
 
     def __init__(
@@ -59,5 +62,6 @@ class Repo(_Repo):
         wal_dir=None,
         replay_stale_wal=False,
         legacy_records="error",
+        engine=None,
     ):
         _open_handles.add(self)

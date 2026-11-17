@@ -144,6 +144,7 @@ fn random_faults(seed: u64, rate: f64) -> Faults {
         ],
         paths: None,
         crash: None,
+        stall: None,
     }
 }
 
@@ -305,6 +306,7 @@ fn chaos_child() {
         "kv-read" => kv_read(&cx),
         "kv-crash" => kv_crash(&cx),
         "kv-checkpoint" => kv_checkpoint(&cx),
+        "kv-below" => kv_below(&cx),
         "trk-write" => trk_write(&cx),
         "trk-delete" => trk_delete(&cx),
         "trk-optimize" => trk_optimize(&cx),
@@ -1420,6 +1422,7 @@ fn kv_checkpoint(cx: &Ctx) {
         kinds: vec![FaultKind::Error],
         paths: Some("checkpoint".into()),
         crash: None,
+        stall: None,
     }));
     for i in 0..105u64 {
         db.put(format!("k{i}").as_bytes(), b"v").unwrap();
@@ -1429,6 +1432,83 @@ fn kv_checkpoint(cx: &Ctx) {
     set_faults(None);
     assert_eq!(db.stats().stored_rows, 105, "no commit stored twice");
     db.close().unwrap();
+}
+
+/// A commit whose file is written after two other commits landed and a purge deleted the first
+/// of them (delta-rs listed the log, then wrote `latest + 1`, which the purge had just removed)
+/// lands below the purge's checkpoint, where no reader sees it. The writer must notice and
+/// commit again on the latest version. (A child process: the stall configuration is
+/// process-wide.)
+#[test]
+fn a_commit_recreated_below_a_new_checkpoint_is_committed_again() {
+    let (d, path, _) = local_db();
+    let sp = Spawner::new(&path, d.path(), &HashMap::new(), seed("below"));
+    wait_all(vec![("below".into(), sp.spawn("kv-below", "b", "", &[]))]);
+}
+
+fn kv_below(cx: &Ctx) {
+    set_faults(Some(Faults::default()));
+    let opts = |w: &str| Options {
+        wal: false,
+        ..kv_opts(&cx.wal().join(w), &cx.storage)
+    };
+    let a = Db::open(&cx.uri, opts("a")).unwrap();
+    a.put(b"a0", b"1").unwrap();
+    a.flush().unwrap();
+    let b = Db::open(&cx.uri, opts("b")).unwrap();
+    // Hold the next commit-file write (a's) until b has committed twice and purged.
+    set_faults(Some(Faults {
+        stall: Some(kv0::testing::Stall {
+            ops: vec![StoreOp::ConditionalPut],
+            path: "_delta_log/".into(),
+            nth: 1,
+            millis: 4_000,
+        }),
+        ..Faults::default()
+    }));
+    let raced = std::thread::spawn({
+        let a = a.clone();
+        move || {
+            a.put(b"a1", b"1").unwrap();
+            a.flush()
+        }
+    });
+    let t0 = std::time::Instant::now();
+    while kv0::testing::stalls_entered() == 0 {
+        assert!(
+            t0.elapsed() < Duration::from_secs(30),
+            "a's commit never started"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let held = a.version();
+    for k in ["b0", "b1"] {
+        b.put(k.as_bytes(), b"1").unwrap();
+        b.flush().unwrap();
+    }
+    b.purge(false).unwrap();
+    assert!(
+        !commit_file(&cx.uri, held + 1).exists(),
+        "the purge removed the commit file a is about to write"
+    );
+    raced.join().unwrap().unwrap();
+    set_faults(None);
+    let c = Db::open(&cx.uri, opts("c")).unwrap();
+    for k in ["a0", "a1", "b0", "b1"] {
+        assert_eq!(
+            c.get(k.as_bytes()).unwrap().as_deref(),
+            Some(&b"1"[..]),
+            "{k}"
+        );
+    }
+    assert_eq!(c.stats().stored_rows, 4, "each write stored once");
+    assert!(
+        !commit_file(&cx.uri, held + 1).exists(),
+        "the unreachable commit file was removed"
+    );
+    for db in [a, b, c] {
+        db.close().unwrap();
+    }
 }
 
 /// A writer whose version is older than a purge (which cuts the log below the latest version)

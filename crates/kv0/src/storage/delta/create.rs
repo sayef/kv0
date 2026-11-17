@@ -102,6 +102,30 @@ async fn check(t: &DeltaTable, uri: &str) -> Result<()> {
         )));
     }
     let config = snap.metadata().configuration();
+    // kv0's own tables say which version of kv0's layout they follow; a table without it was
+    // written by another tool, one with a newer major version by a newer kv0.
+    let format = config.get(super::props::FORMAT_KEY);
+    let major = format
+        .and_then(|f| f.strip_prefix("delta/"))
+        .and_then(|v| v.split('.').next())
+        .and_then(|v| v.parse::<u32>().ok());
+    match major {
+        Some(m) if m <= crate::storage::format::FORMAT_VERSION => {}
+        Some(_) => {
+            return Err(Error::NotSupported(format!(
+                "{uri} was written in kv0 table format {}; this kv0 ({}) reads delta/{} and earlier. Upgrade kv0",
+                format.map(String::as_str).unwrap_or_default(),
+                env!("CARGO_PKG_VERSION"),
+                crate::storage::format::FORMAT_VERSION
+            )))
+        }
+        None => {
+            return Err(Error::NotSupported(format!(
+                "{uri} is a Delta Lake table that kv0 did not create (no `{}` table property)",
+                super::props::FORMAT_KEY
+            )))
+        }
+    }
     for (key, why) in [
         (
             "delta.enableChangeDataFeed",

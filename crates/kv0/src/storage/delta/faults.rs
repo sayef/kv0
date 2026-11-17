@@ -21,7 +21,7 @@ use deltalake_core::{ObjectStore, Path};
 use futures::stream::BoxStream;
 use futures::StreamExt;
 
-use crate::testing::{Crash, FaultKind, Faults, StoreOp};
+use crate::testing::{Crash, FaultKind, Faults, Stall, StoreOp};
 
 /// Whether faults were ever configured in this process: until then, stores are not wrapped.
 static ARMED: AtomicBool = AtomicBool::new(false);
@@ -31,13 +31,44 @@ static SEEN: AtomicU64 = AtomicU64::new(0);
 static INJECTED: AtomicU64 = AtomicU64::new(0);
 /// Operations matching the crash point so far.
 static CRASH_COUNT: AtomicU64 = AtomicU64::new(0);
+/// Operations matching the stall so far, and holds started.
+static STALL_COUNT: AtomicU64 = AtomicU64::new(0);
+static STALLED: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) fn set(f: Option<Faults>) {
     if f.is_some() {
         ARMED.store(true, Ordering::Release);
     }
     CRASH_COUNT.store(0, Ordering::Relaxed);
+    STALL_COUNT.store(0, Ordering::Relaxed);
     *CONFIG.write().expect("not poisoned") = f;
+}
+
+pub(crate) fn stalls_entered() -> u64 {
+    STALLED.load(Ordering::Relaxed)
+}
+
+/// Waits when the configured stall matches this operation.
+async fn stall(op: StoreOp, path: &str) {
+    let millis = {
+        let guard = CONFIG.read().expect("not poisoned");
+        match guard.as_ref().and_then(|f| f.stall.as_ref()) {
+            Some(Stall {
+                ops,
+                path: p,
+                nth,
+                millis,
+            }) if ops.contains(&op)
+                && path.contains(p.as_str())
+                && STALL_COUNT.fetch_add(1, Ordering::Relaxed) + 1 == *nth =>
+            {
+                *millis
+            }
+            _ => return,
+        }
+    };
+    STALLED.fetch_add(1, Ordering::Relaxed);
+    tokio::time::sleep(Duration::from_millis(millis)).await;
 }
 
 pub(crate) fn injected() -> u64 {
@@ -184,6 +215,7 @@ impl ObjectStore for FaultyStore {
             object_store::PutMode::Overwrite => StoreOp::Put,
             _ => StoreOp::ConditionalPut,
         };
+        stall(op, location.as_ref()).await;
         guarded!(
             op,
             location,

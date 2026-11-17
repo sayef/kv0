@@ -211,6 +211,9 @@ fn kv_options(
         if let Some(v) = attr::<u64>(s, "version")? {
             o.version = Some(v);
         }
+        if let Some(v) = attr::<String>(s, "engine")? {
+            o.engine = Some(v.parse().map_err(err)?);
+        }
     }
     Ok(o)
 }
@@ -712,7 +715,7 @@ struct PyRepo {
 #[pymethods]
 impl PyRepo {
     #[new]
-    #[pyo3(signature = (uri, storage_options=None, create_if_missing=true, flush_rows=50_000, flush_interval=5.0, version_retention=604_800.0, orphan_grace=3_600.0, wal=true, wal_sync="batch", wal_dir=None, replay_stale_wal=false, legacy_records="error"))]
+    #[pyo3(signature = (uri, storage_options=None, create_if_missing=true, flush_rows=50_000, flush_interval=5.0, version_retention=604_800.0, orphan_grace=3_600.0, wal=true, wal_sync="batch", wal_dir=None, replay_stale_wal=false, legacy_records="error", engine=None))]
     #[allow(clippy::too_many_arguments)] // mirrors the Python signature
     fn new(
         py: Python<'_>,
@@ -728,6 +731,7 @@ impl PyRepo {
         wal_dir: Option<std::path::PathBuf>,
         replay_stale_wal: bool,
         legacy_records: &str,
+        engine: Option<&str>,
     ) -> PyRes<Self> {
         let legacy_records = match legacy_records {
             "error" => tracking::LegacyRecords::Error,
@@ -755,6 +759,7 @@ impl PyRepo {
             wal_dir,
             replay_stale_wal,
             legacy_records,
+            engine: engine.map(str::parse).transpose().map_err(err)?,
             ..RepoOptions::default()
         };
         let repo = py

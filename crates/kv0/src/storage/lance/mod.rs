@@ -167,6 +167,18 @@ pub(crate) async fn list_dir(uri: &str, options: &StorageOptions) -> Result<Vec<
     Ok(store.read_dir(path).await?)
 }
 
+/// The bytes of the object at `uri`, `None` when there is none.
+#[cfg(not(feature = "delta"))]
+pub(crate) async fn read_file(uri: &str, options: &StorageOptions) -> Result<Option<Vec<u8>>> {
+    let params = store_params(options).unwrap_or_default();
+    let registry = Arc::new(lance::io::ObjectStoreRegistry::default());
+    let (store, path) = lance::io::ObjectStore::from_uri_and_params(registry, uri, &params).await?;
+    if !store.exists(&path).await? {
+        return Ok(None);
+    }
+    Ok(Some(store.read_one_all(&path).await?.to_vec()))
+}
+
 /// Deletes everything under `uri` (a dataset directory).
 pub(crate) async fn remove_dir(uri: &str, options: &StorageOptions) -> Result<()> {
     if is_local(uri) {

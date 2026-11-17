@@ -26,6 +26,7 @@ a periodic task off.
 | `mark_ttl` | 30 days | How long compaction keeps an inactive writer's WAL mark |
 | `replay_stale_wal` | `False` | Replay a WAL older than `mark_ttl` whose mark is gone (writes may be stored twice); otherwise such a WAL fails the open |
 | `version` | `None` | Open this version read-only (time travel) |
+| `engine` | `None` | Storage engine of a database created here: `"lance"` or `"delta"` (see [Storage engines](storage.md#storage-engines)); `None` uses `KV0_ENGINE`, else Lance |
 
 Rust also has `read_only`, `tombstone_grace` (1 h: how long compaction keeps delete markers, so a
 slower writer's older write to the same key stays deleted) and `WriteOptions { sync, disable_wal }`
@@ -43,6 +44,7 @@ per write.
 | `replay_stale_wal` | `False` | As above |
 | `version_retention` | 7 days | Automatic deletion of older versions |
 | `orphan_grace` | 1 h | As above |
+| `engine` | `None` | As above, for a repository created here |
 | `max_fragments` | 32 | Rust: compact a table in the background after a flush above this many small files |
 | `compaction_target_rows` | 1 000 000 | Rust: files of at least this many rows are settled and never recompacted |
 | `mark_prune_interval` | 1 h | Rust: how often background maintenance prunes WAL mark rows |
@@ -53,6 +55,7 @@ per write.
 | Variable | Meaning |
 |---|---|
 | `KV0_WAL_DIR` | Root of write-ahead logs and view snapshots when `wal_dir` is not given |
+| `KV0_ENGINE` | Storage engine of new databases and repositories when `engine` is not given: `lance` (default) or `delta` |
 | `AWS_*`, `GOOGLE_APPLICATION_CREDENTIALS`, `AZURE_*` | Credentials, read by the object store when not in `storage_options` |
 
 ## Choosing values

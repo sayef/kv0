@@ -48,6 +48,7 @@ Object-store tests run against any S3-compatible server. CI starts RustFS in Doc
 KV0_TEST_S3_BUCKET=kv0-test .github/scripts/s3-server.sh
 KV0_TEST_S3_ENDPOINT=http://127.0.0.1:9000 cargo test -p kv0 --test s3
 KV0_TEST_S3_ENDPOINT=http://127.0.0.1:9000 uv run pytest -k s3
+.github/scripts/s3-server.sh stop   # removes the container and its data volume
 ```
 
 The documentation site is MkDocs with the Material theme:
