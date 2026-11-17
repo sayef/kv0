@@ -24,6 +24,8 @@ mod background;
 mod clock;
 pub mod error;
 pub mod kv;
+#[cfg(feature = "lance-migrate")]
+pub mod migrate;
 pub mod purge;
 pub mod rt;
 pub mod storage;

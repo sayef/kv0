@@ -411,6 +411,21 @@ impl Table for LanceTable {
         super::cleanup(&self.ds, c.before).boxed()
     }
 
+    #[cfg(feature = "lance-migrate")]
+    fn last_commit_micros(&self) -> BoxFuture<'_, Result<Option<i64>>> {
+        async move {
+            let latest = self.ds.latest_version_id().await?;
+            Ok(self
+                .ds
+                .versions()
+                .await?
+                .into_iter()
+                .find(|v| v.version == latest)
+                .map(|v| v.timestamp.timestamp_micros()))
+        }
+        .boxed()
+    }
+
     fn tags(&self) -> BoxFuture<'_, Result<Vec<(String, u64)>>> {
         async move {
             Ok(self

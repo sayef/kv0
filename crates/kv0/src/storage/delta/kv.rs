@@ -176,6 +176,65 @@ impl DeltaLog {
         )?))
     }
 
+    /// [`OpLog::rewrite`], with the values the chunks leave in storage read from `source`
+    /// (another log: a migration's) instead of this version.
+    fn rewrite_with(
+        &self,
+        chunks: Vec<SnapChunk>,
+        source: Option<Log>,
+    ) -> BoxFuture<'static, Result<Log>> {
+        let this = self.clone();
+        async move {
+            let removed: Vec<String> = this.files.iter().map(|f| f.path.clone()).collect();
+            let mut w = FileWriter::new(&this.table, props::kv_writer(), Some(TARGET_ROWS))?;
+            for mut chunk in chunks {
+                let key58 = chunk.key.finish();
+                let value58 = chunk.value.finish();
+                let stored: HashMap<usize, u64> = chunk.stored.iter().copied().collect();
+                let wanted: Vec<u64> = chunk.stored.iter().map(|s| s.1).collect();
+                let mut taken: HashMap<usize, Bytes> = chunk
+                    .stored
+                    .iter()
+                    .map(|s| s.0)
+                    .zip(match &source {
+                        Some(s) => s.take(&wanted).await?,
+                        None => this.take_values(&wanted).await?,
+                    })
+                    .collect();
+                // Marks are `txn` actions here, never rows.
+                let keep: Vec<usize> = (0..chunk.len())
+                    .filter(|i| chunk.op[*i] != OP_MARK)
+                    .collect();
+                let seq =
+                    Int64Array::from_iter_values(keep.iter().map(|i| seq_to_i64(chunk.seq[*i])));
+                let op = Int8Array::from_iter_values(keep.iter().map(|i| chunk.op[*i] as i8));
+                let key = BinaryArray::from_iter_values(keep.iter().map(|i| key58.value(*i)));
+                let value: BinaryArray = keep
+                    .iter()
+                    .map(|i| {
+                        if stored.contains_key(i) {
+                            taken.remove(i)
+                        } else {
+                            (!value58.is_null(*i))
+                                .then(|| Bytes::copy_from_slice(value58.value(*i)))
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .iter()
+                    .map(|v| v.as_deref())
+                    .collect();
+                w.write(batch(&this.table, seq, op, key, value)?).await?;
+            }
+            let adds: Vec<_> = w.finish().await?.into_iter().map(|f| f.add).collect();
+            if removed.is_empty() && adds.is_empty() {
+                return Ok(Arc::new(this) as Log);
+            }
+            let t = commit::rewrite(&this.table, &removed, adds, "compact").await?;
+            this.wrap(t, None)
+        }
+        .boxed()
+    }
+
     fn store(&self) -> Arc<dyn ObjectStore> {
         self.table.object_store()
     }
@@ -421,50 +480,26 @@ impl OpLog for DeltaLog {
     }
 
     fn rewrite(&self, chunks: Vec<SnapChunk>) -> BoxFuture<'static, Result<Log>> {
+        self.rewrite_with(chunks, None)
+    }
+
+    #[cfg(feature = "lance-migrate")]
+    fn rewrite_from(&self, chunks: Vec<SnapChunk>, source: Log) -> BoxFuture<'static, Result<Log>> {
+        self.rewrite_with(chunks, Some(source))
+    }
+
+    #[cfg(feature = "lance-migrate")]
+    fn adopt_marks(&self, marks: Vec<WriterMark>) -> BoxFuture<'static, Result<Log>> {
         let this = self.clone();
         async move {
-            let removed: Vec<String> = this.files.iter().map(|f| f.path.clone()).collect();
-            let mut w = FileWriter::new(&this.table, props::kv_writer(), Some(TARGET_ROWS))?;
-            for mut chunk in chunks {
-                let key58 = chunk.key.finish();
-                let value58 = chunk.value.finish();
-                let stored: HashMap<usize, u64> = chunk.stored.iter().copied().collect();
-                let wanted: Vec<u64> = chunk.stored.iter().map(|s| s.1).collect();
-                let mut taken: HashMap<usize, Bytes> = chunk
-                    .stored
-                    .iter()
-                    .map(|s| s.0)
-                    .zip(this.take_values(&wanted).await?)
-                    .collect();
-                // Marks are `txn` actions here, never rows.
-                let keep: Vec<usize> = (0..chunk.len())
-                    .filter(|i| chunk.op[*i] != OP_MARK)
-                    .collect();
-                let seq =
-                    Int64Array::from_iter_values(keep.iter().map(|i| seq_to_i64(chunk.seq[*i])));
-                let op = Int8Array::from_iter_values(keep.iter().map(|i| chunk.op[*i] as i8));
-                let key = BinaryArray::from_iter_values(keep.iter().map(|i| key58.value(*i)));
-                let value: BinaryArray = keep
-                    .iter()
-                    .map(|i| {
-                        if stored.contains_key(i) {
-                            taken.remove(i)
-                        } else {
-                            (!value58.is_null(*i))
-                                .then(|| Bytes::copy_from_slice(value58.value(*i)))
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .iter()
-                    .map(|v| v.as_deref())
-                    .collect();
-                w.write(batch(&this.table, seq, op, key, value)?).await?;
-            }
-            let adds: Vec<_> = w.finish().await?.into_iter().map(|f| f.add).collect();
-            if removed.is_empty() && adds.is_empty() {
+            if marks.is_empty() {
                 return Ok(Arc::new(this) as Log);
             }
-            let t = commit::rewrite(&this.table, &removed, adds, "compact").await?;
+            let txns = marks
+                .iter()
+                .map(|m| commit::mark(&m.writer, seq_to_i64(m.seq)))
+                .collect();
+            let t = commit::marks(&this.table, txns).await?;
             this.wrap(t, None)
         }
         .boxed()

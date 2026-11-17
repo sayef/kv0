@@ -98,6 +98,29 @@ pub(crate) trait OpLog: Send + Sync + 'static {
     /// other writers appended meanwhile are kept.
     fn rewrite(&self, chunks: Vec<SnapChunk>) -> BoxFuture<'static, Result<Log>>;
 
+    /// [`OpLog::rewrite`] for a migration: the values the chunks leave in storage are read from
+    /// `source`, the log being migrated.
+    #[cfg(feature = "lance-migrate")]
+    fn rewrite_from(
+        &self,
+        _chunks: Vec<SnapChunk>,
+        _source: Log,
+    ) -> BoxFuture<'static, Result<Log>> {
+        futures::future::ready(Err(crate::Error::NotSupported(
+            "this engine cannot be a migration's target".into(),
+        )))
+        .boxed()
+    }
+
+    /// Commits writer marks alone, for a migration carrying over the source's marks.
+    #[cfg(feature = "lance-migrate")]
+    fn adopt_marks(&self, _marks: Vec<WriterMark>) -> BoxFuture<'static, Result<Log>> {
+        futures::future::ready(Err(crate::Error::NotSupported(
+            "this engine cannot be a migration's target".into(),
+        )))
+        .boxed()
+    }
+
     /// Merges small files into larger ones, rows unchanged, in one commit.
     fn merge_small(&self) -> BoxFuture<'static, Result<Log>>;
 

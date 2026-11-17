@@ -819,9 +819,9 @@ fn read_series_rows(batches: &[RecordBatch]) -> Result<Vec<SeriesInfo>> {
 const TOMBSTONE_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Run id prefix of the WAL mark rows in `runs`, `params` and `series`.
-const MARK_PREFIX: &str = "__kv0_wal__/";
+pub(crate) const MARK_PREFIX: &str = "__kv0_wal__/";
 
-fn writer_hash(writer: &str) -> i64 {
+pub(crate) fn writer_hash(writer: &str) -> i64 {
     xxhash_rust::xxh3::xxh3_64(writer.as_bytes()) as i64
 }
 

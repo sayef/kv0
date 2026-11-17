@@ -14,7 +14,7 @@
 
 mod cache;
 mod snapshot;
-mod store;
+pub(crate) mod store;
 pub(crate) mod view;
 pub(crate) mod wal;
 
