@@ -5,13 +5,16 @@
 //! stays the same for as long as the file is part of the table.
 
 use std::collections::HashSet;
+#[cfg(feature = "delta")]
+use std::sync::Arc;
 
 use arrow_array::RecordBatch;
 use arrow_schema::SchemaRef;
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
+use futures::FutureExt;
 
-use super::oplog::FileId;
+use super::oplog::{FileId, WriterMark};
 use super::pred::Pred;
 use super::StorageOptions;
 use crate::error::Result;
@@ -128,8 +131,25 @@ pub(crate) trait Table: Send + Sync + 'static {
     /// Rows matching `filter` (all rows when `None`).
     fn count(&self, filter: Option<Pred>) -> BoxFuture<'_, Result<usize>>;
 
-    /// Appends `batches` in one commit.
-    fn append(&mut self, batches: Vec<RecordBatch>) -> BoxFuture<'_, Result<()>>;
+    /// Appends `batches` in one commit. With `mark`, an engine that keeps writer marks itself
+    /// ([`Table::keeps_marks`]) commits the mark with the rows.
+    fn append(
+        &mut self,
+        batches: Vec<RecordBatch>,
+        mark: Option<WriterMark>,
+    ) -> BoxFuture<'_, Result<()>>;
+
+    /// Whether the engine keeps writer marks itself ([`Table::append`]); otherwise the caller
+    /// writes them as rows.
+    fn keeps_marks(&self) -> bool {
+        false
+    }
+
+    /// The highest sequence number `writer` committed to this table, as of this version, when
+    /// the engine keeps writer marks.
+    fn writer_mark<'a>(&'a self, _writer: &'a str) -> BoxFuture<'a, Result<Option<u64>>> {
+        async { Ok(None) }.boxed()
+    }
 
     /// Adds the nullable columns of `added`, null in every existing row.
     fn add_columns(&mut self, added: SchemaRef) -> BoxFuture<'_, Result<()>>;
@@ -172,6 +192,13 @@ pub(crate) trait Table: Send + Sync + 'static {
     fn create_tag<'a>(&'a self, tag: &'a str, version: u64) -> BoxFuture<'a, Result<()>>;
 
     fn delete_tag<'a>(&'a self, tag: &'a str) -> BoxFuture<'a, Result<()>>;
+
+    /// Files read and skipped, row groups read and skipped by scans of this handle, where the
+    /// engine counts them.
+    #[cfg(all(test, feature = "delta"))]
+    fn pruning(&self) -> Option<[u64; 4]> {
+        None
+    }
 }
 
 /// Files below `target` rows: only these can be merged, so only these count.
@@ -192,14 +219,149 @@ pub(crate) async fn old_tags(t: &dyn Table) -> Result<Vec<(String, u64)>> {
     Ok(out)
 }
 
-/// Opens the table at `uri`, creating it empty with `schema` when it does not exist and
-/// `create` is set. `retention` applies to a table created here.
-pub(crate) async fn open(
-    uri: &str,
-    options: &StorageOptions,
-    schema: SchemaRef,
-    create: bool,
-    retention: Option<std::time::Duration>,
-) -> Result<TableRef> {
-    super::lance::table::open(uri, options, schema, create, retention).await
+/// A directory of tables in one engine: a tracking repository. Table names are paths under
+/// it (`runs`, `records/<name>`); each engine places a table where it keeps it (Lance:
+/// `<name>.lance`, Delta: `<name>/`).
+#[derive(Clone)]
+pub(crate) struct Root {
+    uri: String,
+    options: StorageOptions,
+    engine: Engine,
+}
+
+#[derive(Clone)]
+enum Engine {
+    Lance,
+    /// With the store every table shares, for `memory://` roots (each handle on a memory
+    /// location otherwise gets a store of its own).
+    #[cfg(feature = "delta")]
+    Delta(Option<Arc<dyn deltalake_core::ObjectStore>>),
+}
+
+impl Root {
+    /// The repository at `uri`, in the engine it was written with (a new one: see
+    /// [`super::delta::chooses_repo`]).
+    pub(crate) async fn open(uri: &str, options: &StorageOptions) -> Result<Root> {
+        #[cfg(feature = "delta")]
+        let engine = if super::delta::chooses_repo(uri, options).await? {
+            Engine::Delta(uri.starts_with("memory://").then(|| {
+                Arc::new(deltalake_core::logstore::object_store::memory::InMemory::new())
+                    as Arc<dyn deltalake_core::ObjectStore>
+            }))
+        } else {
+            Engine::Lance
+        };
+        #[cfg(not(feature = "delta"))]
+        let engine = Engine::Lance;
+        Ok(Root {
+            uri: uri.to_string(),
+            options: options.clone(),
+            engine,
+        })
+    }
+
+    /// Whether the tables are Delta tables.
+    pub(crate) fn is_delta(&self) -> bool {
+        !matches!(self.engine, Engine::Lance)
+    }
+
+    /// Where table `name` is kept.
+    pub(crate) fn location(&self, name: &str) -> String {
+        match self.engine {
+            Engine::Lance => super::join(&self.uri, &format!("{name}.lance")),
+            #[cfg(feature = "delta")]
+            Engine::Delta(_) => super::join(&self.uri, name),
+        }
+    }
+
+    /// The name of the table earlier builds kept every records table in (Lance:
+    /// `records.lance`; Delta: `_legacy_records`, which a migration writes).
+    pub(crate) fn legacy_records(&self) -> &'static str {
+        match self.engine {
+            Engine::Lance => "records",
+            #[cfg(feature = "delta")]
+            Engine::Delta(_) => "_legacy_records",
+        }
+    }
+
+    /// Opens table `name`, creating it empty with `schema` (the stored layout of the Lance
+    /// engine; see `storage::types`) when it does not exist and `create` is set. `retention`
+    /// and `mark_ttl` (how long writer marks are kept, where the engine keeps them) apply to a
+    /// table created here.
+    pub(crate) async fn table(
+        &self,
+        name: &str,
+        schema: SchemaRef,
+        create: bool,
+        retention: Option<std::time::Duration>,
+        mark_ttl: std::time::Duration,
+    ) -> Result<TableRef> {
+        let uri = self.location(name);
+        match &self.engine {
+            Engine::Lance => {
+                let _ = mark_ttl;
+                super::lance::table::open(&uri, &self.options, schema, create, retention).await
+            }
+            #[cfg(feature = "delta")]
+            Engine::Delta(store) => {
+                super::delta::rows::open(
+                    &uri,
+                    &self.options,
+                    store.clone(),
+                    schema,
+                    create,
+                    retention,
+                    mark_ttl,
+                )
+                .await
+            }
+        }
+    }
+
+    /// Names of the tables in directory `dir`.
+    pub(crate) async fn tables(&self, dir: &str) -> Result<Vec<String>> {
+        let uri = super::join(&self.uri, dir);
+        match &self.engine {
+            Engine::Lance => Ok(super::list_dir(&uri, &self.options)
+                .await?
+                .into_iter()
+                .filter_map(|n| n.strip_suffix(".lance").map(str::to_string))
+                .collect()),
+            #[cfg(feature = "delta")]
+            Engine::Delta(store) => {
+                super::delta::rows::list(&uri, &self.options, store.as_ref()).await
+            }
+        }
+    }
+
+    /// Whether table `name` exists (one listing).
+    pub(crate) async fn exists(&self, name: &str) -> Result<bool> {
+        match &self.engine {
+            Engine::Lance => {
+                let file = format!("{name}.lance");
+                let (dir, base) = match file.rsplit_once('/') {
+                    Some((d, b)) => (super::join(&self.uri, d), b.to_string()),
+                    None => (self.uri.clone(), file.clone()),
+                };
+                Ok(super::list_dir(&dir, &self.options).await?.contains(&base))
+            }
+            #[cfg(feature = "delta")]
+            Engine::Delta(store) => {
+                super::delta::rows::exists(&self.location(name), &self.options, store.as_ref())
+                    .await
+            }
+        }
+    }
+
+    /// Deletes table `name` and every version of it.
+    pub(crate) async fn remove(&self, name: &str) -> Result<()> {
+        let uri = self.location(name);
+        match &self.engine {
+            Engine::Lance => super::remove_dir(&uri, &self.options).await,
+            #[cfg(feature = "delta")]
+            Engine::Delta(store) => {
+                super::delta::rows::remove(&uri, &self.options, store.as_ref()).await
+            }
+        }
+    }
 }

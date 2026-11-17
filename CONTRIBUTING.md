@@ -25,12 +25,14 @@ uv run --no-sync maturin develop --release
 uv run --no-sync pytest
 ```
 
-The key-value layer also runs on a Delta Lake engine (delta-rs without DataFusion), behind the
-`delta` feature, which needs Rust 1.95 or newer. New databases use it when `KV0_TEST_BACKEND=delta`
-is set; existing ones keep the engine they were created with. CI runs the suite both ways:
+The key-value and tracking layers also run on a Delta Lake engine (delta-rs without DataFusion),
+behind the `delta` feature, which needs Rust 1.95 or newer. New databases and repositories use it
+when `KV0_TEST_BACKEND=delta` is set; existing ones keep the engine they were created with. CI runs
+the Rust and Python suites both ways:
 
 ```sh
 KV0_TEST_BACKEND=delta cargo test -p kv0 --features delta
+uv run --no-sync maturin develop --features delta && KV0_TEST_BACKEND=delta uv run --no-sync pytest
 ```
 
 Object-store tests run against any S3-compatible server. CI starts RustFS in Docker:
@@ -53,7 +55,7 @@ uv run mkdocs build --strict      # what CI runs: no warnings allowed
 
 - `crates/kv0`: the library. `src/kv` is the key-value layer (`view.rs` the in-memory ordered view,
   `store.rs` reading the operation log), `src/tracking` the tracking tables, `src/storage` locations,
-  object-store options and the storage engines (`oplog.rs` and `table.rs` the interfaces, `pred.rs` filters, `lance/` the Lance engine, `delta/` the Delta Lake engine of the key-value layer), `src/rt.rs` the Tokio runtime behind the blocking APIs.
+  object-store options and the storage engines (`oplog.rs` and `table.rs` the interfaces, `pred.rs` filters, `lance/` the Lance engine, `delta/` the Delta Lake engine: `kv.rs` the key-value log, `rows.rs` the tracking and records tables, `filter.rs` predicates without a query engine), `src/rt.rs` the Tokio runtime behind the blocking APIs.
 - `crates/kv0-py`: the Python bindings (PyO3), the pure-Python package in `python/kv0`, typed stubs
   and the Python tests.
 - `bench/`: the evaluation harness (`bench/eval/`), the key-value comparison with the SQLite-cache

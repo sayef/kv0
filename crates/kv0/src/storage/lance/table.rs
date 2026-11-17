@@ -28,13 +28,13 @@ use lance_index::scalar::{BuiltinIndexType, ScalarIndexParams};
 use lance_index::IndexType;
 
 use crate::error::{Error, Result};
-use crate::storage::oplog::FileId;
+use crate::storage::oplog::{FileId, WriterMark};
 use crate::storage::pred::Pred;
 use crate::storage::table::{BatchStream, FileTag, Scan, Table, TableFile, TableRef, Tagged};
 use crate::storage::types;
 use crate::storage::StorageOptions;
 
-/// Opens the table at `uri` (see [`crate::storage::table::open`]).
+/// Opens the table at `uri` (see [`crate::storage::table::Root::table`]).
 pub(crate) async fn open(
     uri: &str,
     options: &StorageOptions,
@@ -265,7 +265,12 @@ impl Table for LanceTable {
         async move { Ok(self.ds.count_rows(filter.map(|p| self.sql(&p))).await?) }.boxed()
     }
 
-    fn append(&mut self, batches: Vec<RecordBatch>) -> BoxFuture<'_, Result<()>> {
+    /// Lance keeps no writer marks: callers write them as rows.
+    fn append(
+        &mut self,
+        batches: Vec<RecordBatch>,
+        _mark: Option<WriterMark>,
+    ) -> BoxFuture<'_, Result<()>> {
         async move {
             let stored = self.stored();
             let batches = batches
@@ -475,7 +480,7 @@ mod tests {
         .unwrap();
         let t = crate::rt::block_on(async move {
             let mut t = open("memory://pred", &StorageOptions::new(), schema, true, None).await?;
-            t.append(vec![batch]).await?;
+            t.append(vec![batch], None).await?;
             Ok::<_, Error>(t)
         })
         .unwrap();
@@ -531,7 +536,7 @@ mod tests {
                 None,
             )
             .await?;
-            t.append(vec![batch]).await?;
+            t.append(vec![batch], None).await?;
             Ok::<_, Error>(t)
         })
         .unwrap();

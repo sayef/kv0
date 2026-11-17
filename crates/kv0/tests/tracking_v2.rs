@@ -943,8 +943,8 @@ fn optimize_folds_superseded_run_rows() {
     let r = repo.clone();
     block_on(async move { r.delete_runs(&["gone".into()]).await }).unwrap();
     let rows = || {
-        let p = format!("{uri}/runs.lance");
-        block_on(async move { lance::Dataset::open(&p).await?.count_rows(None).await }).unwrap()
+        let r = repo.clone();
+        block_on(async move { r.table_rows("runs").await }).unwrap()
     };
     let before = rows();
     let info = run_info(&repo, "busy");
