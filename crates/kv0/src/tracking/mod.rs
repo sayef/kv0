@@ -15,7 +15,7 @@
 //! only buffers and never blocks on I/O, unless the buffer is full.
 
 mod json;
-mod records;
+pub(crate) mod records;
 pub mod schema;
 mod stats;
 

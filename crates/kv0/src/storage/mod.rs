@@ -14,6 +14,8 @@ use std::path::Path;
 use crate::error::{Error, Result};
 
 pub(crate) mod arrow_bridge;
+#[cfg(feature = "delta")]
+pub(crate) mod delta;
 pub(crate) mod lance;
 pub(crate) mod oplog;
 pub(crate) mod pred;
