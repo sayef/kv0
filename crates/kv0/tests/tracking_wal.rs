@@ -8,6 +8,12 @@ use kv0::rt::block_on;
 use kv0::tracking::{NewRun, Repo, RepoOptions, StepRange, Track};
 use serde_json::json;
 
+/// Metric mark rows a flush with a WAL leaves: one on Lance; none on Delta, which keeps marks
+/// as `txn` actions.
+fn mark_rows() -> usize {
+    usize::from(std::env::var("KV0_TEST_BACKEND").as_deref() != Ok("delta"))
+}
+
 fn opts(wal: &Path) -> RepoOptions {
     RepoOptions {
         flush_interval: None,
@@ -212,7 +218,11 @@ fn crash_between_commit_and_truncate(cleanup: bool) {
     assert_eq!(points(&repo, "r1", "m").len(), 100);
     let r = repo.clone();
     let rows = block_on(async move { r.metric_rows().await }).unwrap();
-    assert_eq!(rows, 100 + 1, "100 points and one mark row, nothing twice");
+    assert_eq!(
+        rows,
+        100 + mark_rows(),
+        "100 points and at most one mark row, nothing twice"
+    );
     let r = repo.clone();
     let params = block_on(async move { r.params("r1").await }).unwrap();
     assert_eq!(params["lr"], json!(0.2));
@@ -285,14 +295,14 @@ fn optimize_keeps_one_mark_per_writer() {
     let r = repo.clone();
     assert_eq!(
         block_on(async move { r.metric_rows().await }).unwrap(),
-        5 + 5
+        5 + 5 * mark_rows()
     );
     let r = repo.clone();
     block_on(async move { r.optimize().await }).unwrap();
     let r = repo.clone();
     assert_eq!(
         block_on(async move { r.metric_rows().await }).unwrap(),
-        5 + 1
+        5 + mark_rows()
     );
     assert_eq!(points(&repo, "r1", "m").len(), 5);
 }
@@ -436,7 +446,7 @@ fn marks_are_pruned_soon_after_open() {
     let r = repo.clone();
     let before = block_on(async move { r.metric_rows().await }).unwrap();
     // Only the first maintenance pruned; later flushes each left a mark.
-    assert!(before >= 10 + 8, "{before} rows");
+    assert!(before >= 10 + 8 * mark_rows(), "{before} rows");
     drop(run);
     let r = repo.clone();
     block_on(async move { r.close().await }).unwrap();

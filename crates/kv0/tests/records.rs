@@ -150,6 +150,11 @@ fn a_repository_with_the_old_shared_records_table() {
     };
     use arrow_schema::{DataType, Field, Schema, TimeUnit};
     use kv0::tracking::LegacyRecords;
+    if std::env::var("KV0_TEST_BACKEND").as_deref() == Ok("delta") {
+        // A Delta repository's legacy table is `_legacy_records`, which only a migration
+        // writes; the crate's own tests cover it.
+        return;
+    }
     let d = tempfile::tempdir().unwrap();
     let root = d.path().join("repo");
     let uri = root.to_string_lossy().into_owned();

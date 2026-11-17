@@ -149,6 +149,9 @@ fn records_tags_on_tables_with_special_characters_protect_their_version() {
 
 #[test]
 fn records_tables_from_the_earlier_directory_names_are_moved_with_their_tags() {
+    if std::env::var("KV0_TEST_BACKEND").as_deref() == Ok("delta") {
+        return; // the `~XX` names were only ever written as Lance datasets
+    }
     use kv0::rt::block_on;
     use kv0::tracking::{At, RecordQuery, Repo, RepoOptions};
     let d = tempfile::tempdir().unwrap();
@@ -316,6 +319,9 @@ fn reads_by_tag_or_cleaned_up_version_finish_promptly() {
 
 #[test]
 fn processes_opening_an_earlier_layout_at_once_all_succeed() {
+    if std::env::var("KV0_TEST_BACKEND").as_deref() == Ok("delta") {
+        return; // the `~XX` names were only ever written as Lance datasets
+    }
     use kv0::rt::block_on;
     use kv0::tracking::{Repo, RepoOptions};
     let d = tempfile::tempdir().unwrap();
