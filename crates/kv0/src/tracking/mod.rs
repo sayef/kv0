@@ -2597,7 +2597,7 @@ impl Repo {
             let (create, engine) = (opts.create_if_missing, opts.engine);
             rt::spawn(async move { Root::open(&u, &o, create, engine).await }).await?
         };
-        if !root.is_delta() {
+        if root.is_lance() {
             let (u, o) = (uri.clone(), opts.storage_options.clone());
             let moved = rt::spawn(async move { records::migrate_paths(&u, &o).await }).await?;
             if !moved.is_empty() {

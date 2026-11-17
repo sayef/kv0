@@ -214,6 +214,7 @@ pub(crate) async fn open(
         }
         #[cfg(not(feature = "delta"))]
         super::Engine::Delta => unreachable!("choose refuses Delta without the feature"),
+        super::Engine::Moraine => unreachable!("choose refuses moraine for key-value databases"),
         super::Engine::Lance => {
             let _ = (mark_ttl, format);
             super::lance::kv::open(uri, options, version, create, retention).await

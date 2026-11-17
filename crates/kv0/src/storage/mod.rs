@@ -21,6 +21,8 @@ pub(crate) mod delta;
 pub(crate) mod faults;
 pub mod format;
 pub(crate) mod lance;
+#[cfg(feature = "moraine")]
+pub(crate) mod moraine;
 pub(crate) mod oplog;
 pub(crate) mod pred;
 pub(crate) mod table;

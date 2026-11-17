@@ -25,6 +25,8 @@ pub enum Engine {
     Lance,
     /// Delta Lake tables (delta-rs).
     Delta,
+    /// moraine databases (tracking repositories only, so far).
+    Moraine,
 }
 
 impl Engine {
@@ -33,11 +35,12 @@ impl Engine {
         match self {
             Engine::Lance => "lance",
             Engine::Delta => "delta",
+            Engine::Moraine => "moraine",
         }
     }
 
-    /// The engine for new locations named by the environment: `KV0_ENGINE` (`lance` or
-    /// `delta`), else `KV0_TEST_BACKEND` (what kv0's own test suites set). `None` when neither
+    /// The engine for new locations named by the environment: `KV0_ENGINE` (`lance`, `delta`
+    /// or `moraine`), else `KV0_TEST_BACKEND` (what kv0's own test suites set). `None` when neither
     /// is set; an unknown name is an error.
     pub fn from_env() -> Result<Option<Engine>> {
         for var in ["KV0_ENGINE", "KV0_TEST_BACKEND"] {
@@ -67,8 +70,9 @@ impl std::str::FromStr for Engine {
         match s.to_ascii_lowercase().as_str() {
             "lance" => Ok(Engine::Lance),
             "delta" => Ok(Engine::Delta),
+            "moraine" => Ok(Engine::Moraine),
             _ => Err(Error::InvalidArgument(format!(
-                "unknown storage engine {s:?} (expected \"lance\" or \"delta\")"
+                "unknown storage engine {s:?} (expected \"lance\", \"delta\" or \"moraine\")"
             ))),
         }
     }
@@ -113,8 +117,8 @@ pub(crate) enum Kind {
 }
 
 impl Kind {
-    #[cfg_attr(not(feature = "delta"), allow(dead_code))]
-    fn name(self) -> &'static str {
+    #[cfg_attr(not(any(feature = "delta", feature = "moraine")), allow(dead_code))]
+    pub(crate) fn name(self) -> &'static str {
         match self {
             Kind::Database => "database",
             Kind::Repository => "repository",
@@ -188,8 +192,17 @@ pub(crate) async fn detect_uri(uri: &str, options: &StorageOptions) -> Result<Fo
         Format::Database(Engine::Lance)
     } else if LANCE_TABLES.iter().any(|t| has(t)) {
         Format::Repository(Engine::Lance)
-    } else if DELTA_TABLES.iter().any(|t| has(t)) {
-        Format::Repository(Engine::Delta)
+    } else if let Some(t) = DELTA_TABLES.iter().find(|t| has(t)) {
+        // moraine keeps a table's Delta log under `<table>/data/`, Delta under `<table>/`.
+        if list(&super::join(uri, t), options)
+            .await?
+            .iter()
+            .any(|n| n == "data")
+        {
+            Format::Repository(Engine::Moraine)
+        } else {
+            Format::Repository(Engine::Delta)
+        }
     } else if names.is_empty() || names.iter().all(|n| n == "_kv0") {
         Format::Empty
     } else {
@@ -245,6 +258,14 @@ pub(crate) async fn choose(
                 kind.noun()
             )));
         }
+        (Some(found), Some(w)) if found != w => {
+            return Err(Error::NotSupported(format!(
+                "{uri} holds {} in the {} format; the {} engine cannot open it",
+                kind.noun(),
+                found,
+                w
+            )));
+        }
         (Some(e), _) => e,
         (None, Some(e)) => e,
         (None, None) => Engine::from_env()?.unwrap_or(Engine::Lance),
@@ -258,6 +279,21 @@ pub(crate) async fn choose(
         } else {
             "the Delta Lake engine was chosen, but this build of kv0 has only the Lance engine (enable the `delta` feature)".to_string()
         }));
+    }
+    if engine == Engine::Moraine && !cfg!(feature = "moraine") {
+        return Err(Error::NotSupported(if found.is_some() {
+            format!(
+                "{uri} holds {} in the moraine format; this build of kv0 has no moraine engine (enable the `moraine` feature)",
+                kind.noun()
+            )
+        } else {
+            "the moraine engine was chosen, but this build of kv0 does not have it (enable the `moraine` feature)".to_string()
+        }));
+    }
+    if engine == Engine::Moraine && kind == Kind::Database {
+        return Err(Error::NotSupported(format!(
+            "{uri}: the moraine engine holds tracking repositories only so far, not key-value databases"
+        )));
     }
     Ok((engine, format))
 }
@@ -417,6 +453,8 @@ mod tests {
             Err(Error::InvalidArgument(_))
         ));
         assert_eq!(Engine::Delta.to_string(), "delta");
+        assert_eq!("MORAINE".parse::<Engine>().unwrap(), Engine::Moraine);
+        assert_eq!(Engine::Moraine.to_string(), "moraine");
     }
 
     #[test]
@@ -450,6 +488,13 @@ mod tests {
         assert_eq!(
             at("repo-delta", &["runs/_delta_log"]),
             Format::Repository(Engine::Delta)
+        );
+        assert_eq!(
+            at(
+                "repo-moraine",
+                &["runs/data/_delta_log", "metrics/data/_delta_log"]
+            ),
+            Format::Repository(Engine::Moraine)
         );
         assert_eq!(at("other", &["photos"]), Format::Unknown);
         assert_eq!(
@@ -532,6 +577,17 @@ mod tests {
                     .1,
                 Format::Empty
             );
+            // moraine holds tracking repositories only, and a Lance location stays Lance.
+            let e = ch(&new, Kind::Database, Some(Engine::Moraine))
+                .await
+                .unwrap_err();
+            assert!(matches!(e, Error::NotSupported(_)), "{e}");
+            let e = ch(&repo, Kind::Repository, Some(Engine::Moraine))
+                .await
+                .unwrap_err();
+            assert!(matches!(e, Error::NotSupported(_)), "{e}");
+            let moraine = ch(&new, Kind::Repository, Some(Engine::Moraine)).await;
+            assert_eq!(moraine.is_ok(), cfg!(feature = "moraine"), "{moraine:?}");
             let delta = ch(&new, Kind::Database, Some(Engine::Delta)).await;
             if cfg!(feature = "delta") {
                 assert_eq!(delta.unwrap().0, Engine::Delta);

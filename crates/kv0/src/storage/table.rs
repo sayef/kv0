@@ -5,7 +5,7 @@
 //! stays the same for as long as the file is part of the table.
 
 use std::collections::HashSet;
-#[cfg(feature = "delta")]
+#[cfg(any(feature = "delta", feature = "moraine"))]
 use std::sync::Arc;
 
 use arrow_array::RecordBatch;
@@ -261,6 +261,8 @@ enum Engine {
     /// location otherwise gets a store of its own).
     #[cfg(feature = "delta")]
     Delta(Option<Arc<dyn deltalake_core::ObjectStore>>),
+    #[cfg(feature = "moraine")]
+    Moraine(Arc<super::moraine::Repo>),
 }
 
 impl Root {
@@ -288,6 +290,19 @@ impl Root {
             }
             #[cfg(not(feature = "delta"))]
             super::Engine::Delta => unreachable!("choose refuses Delta without the feature"),
+            #[cfg(feature = "moraine")]
+            super::Engine::Moraine => {
+                let new = matches!(format, super::Format::Empty | super::Format::Unknown);
+                let memory = uri
+                    .starts_with("memory://")
+                    .then(|| Arc::new(object_store::memory::InMemory::new()));
+                let marker = (create && new).then_some(Kind::Repository);
+                Engine::Moraine(Arc::new(
+                    super::moraine::Repo::open(uri, options, memory, marker).await?,
+                ))
+            }
+            #[cfg(not(feature = "moraine"))]
+            super::Engine::Moraine => unreachable!("choose refuses moraine without the feature"),
             super::Engine::Lance => {
                 let _ = (create, format);
                 Engine::Lance
@@ -326,8 +341,14 @@ impl Root {
     }
 
     /// Whether the tables are Delta tables.
+    #[cfg(all(test, feature = "delta"))]
     pub(crate) fn is_delta(&self) -> bool {
-        !matches!(self.engine, Engine::Lance)
+        matches!(self.engine, Engine::Delta(_))
+    }
+
+    /// Whether the tables are Lance datasets.
+    pub(crate) fn is_lance(&self) -> bool {
+        matches!(self.engine, Engine::Lance)
     }
 
     /// Where table `name` is kept.
@@ -336,6 +357,8 @@ impl Root {
             Engine::Lance => super::join(&self.uri, &format!("{name}.lance")),
             #[cfg(feature = "delta")]
             Engine::Delta(_) => super::join(&self.uri, name),
+            #[cfg(feature = "moraine")]
+            Engine::Moraine(_) => super::join(&self.uri, &super::moraine::table_name(name)),
         }
     }
 
@@ -346,6 +369,9 @@ impl Root {
             Engine::Lance => "records",
             #[cfg(feature = "delta")]
             Engine::Delta(_) => "_legacy_records",
+            // Never written: there is no migration to moraine that would.
+            #[cfg(feature = "moraine")]
+            Engine::Moraine(_) => "legacy-records",
         }
     }
 
@@ -380,6 +406,11 @@ impl Root {
                 )
                 .await
             }
+            #[cfg(feature = "moraine")]
+            Engine::Moraine(repo) => {
+                let _ = (retention, mark_ttl);
+                super::moraine::table::open(repo, name, schema, create).await
+            }
         }
     }
 
@@ -395,6 +426,15 @@ impl Root {
             #[cfg(feature = "delta")]
             Engine::Delta(store) => {
                 super::delta::rows::list(&uri, &self.options, store.as_ref()).await
+            }
+            #[cfg(feature = "moraine")]
+            Engine::Moraine(repo) => {
+                let _ = uri;
+                if dir == crate::tracking::records::DIR {
+                    repo.record_tables().await
+                } else {
+                    Ok(Vec::new())
+                }
             }
         }
     }
@@ -415,6 +455,8 @@ impl Root {
                 super::delta::rows::exists(&self.location(name), &self.options, store.as_ref())
                     .await
             }
+            #[cfg(feature = "moraine")]
+            Engine::Moraine(repo) => repo.exists(name).await,
         }
     }
 
@@ -426,6 +468,11 @@ impl Root {
             #[cfg(feature = "delta")]
             Engine::Delta(store) => {
                 super::delta::rows::remove(&uri, &self.options, store.as_ref()).await
+            }
+            #[cfg(feature = "moraine")]
+            Engine::Moraine(repo) => {
+                let _ = uri;
+                repo.remove(name).await
             }
         }
     }
