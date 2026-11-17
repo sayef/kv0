@@ -246,31 +246,34 @@ enum Engine {
 }
 
 impl Root {
-    /// The repository at `uri`, in the engine it was written with (a new one: see
-    /// [`super::delta::chooses_repo`]).
-    pub(crate) async fn open(uri: &str, options: &StorageOptions) -> Result<Root> {
-        #[cfg(feature = "delta")]
-        let engine = if super::delta::chooses_repo(uri, options).await? {
-            Engine::Delta(uri.starts_with("memory://").then(|| {
-                Arc::new(deltalake_core::logstore::object_store::memory::InMemory::new())
-                    as Arc<dyn deltalake_core::ObjectStore>
-            }))
-        } else {
-            Engine::Lance
-        };
-        #[cfg(not(feature = "delta"))]
-        let engine = {
-            let runs = super::join(uri, "runs");
-            if super::list_dir(&runs, options)
-                .await?
-                .iter()
-                .any(|n| n == "_delta_log")
-            {
-                return Err(crate::Error::NotSupported(format!(
-                    "{uri} holds Delta Lake tables; this build of kv0 has only the Lance engine (enable the `delta` feature)"
-                )));
+    /// The repository at `uri`, in the engine it was written with; a new one in `engine`, else
+    /// the one `KV0_ENGINE` names, else Lance (see [`super::format::choose`]). A new Delta
+    /// repository gets its format marker when `create` is set.
+    pub(crate) async fn open(
+        uri: &str,
+        options: &StorageOptions,
+        create: bool,
+        engine: Option<super::Engine>,
+    ) -> Result<Root> {
+        use super::format::{choose, Kind};
+        let (chosen, format) = choose(uri, options, Kind::Repository, engine).await?;
+        let engine = match chosen {
+            #[cfg(feature = "delta")]
+            super::Engine::Delta => {
+                if create && matches!(format, super::Format::Empty | super::Format::Unknown) {
+                    super::format::write_marker(uri, options, Kind::Repository).await?;
+                }
+                Engine::Delta(uri.starts_with("memory://").then(|| {
+                    Arc::new(deltalake_core::logstore::object_store::memory::InMemory::new())
+                        as Arc<dyn deltalake_core::ObjectStore>
+                }))
             }
-            Engine::Lance
+            #[cfg(not(feature = "delta"))]
+            super::Engine::Delta => unreachable!("choose refuses Delta without the feature"),
+            super::Engine::Lance => {
+                let _ = (create, format);
+                Engine::Lance
+            }
         };
         Ok(Root {
             uri: uri.to_string(),

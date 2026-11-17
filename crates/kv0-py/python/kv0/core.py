@@ -88,6 +88,9 @@ class Options:
     * ``replay_stale_wal``: replay a write-ahead log older than ``mark_ttl`` whose writer's mark
       has expired; its writes may then be stored twice (default ``False``: the open fails)
     * ``version``: open this storage version read-only (time travel)
+    * ``engine``: storage engine of a database created here, ``"lance"`` or ``"delta"``; an
+      existing database always opens with its own engine, and naming another one fails
+      (default: ``KV0_ENGINE``, else Lance)
     """
 
     def __init__(self, create_if_missing: bool = True, **kwargs):

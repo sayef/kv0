@@ -25,7 +25,7 @@ use url::Url;
 
 use crate::error::{Error, Result};
 use crate::kv::VersionInfo;
-use crate::storage::{is_local, non_empty, Cleanup, StorageOptions};
+use crate::storage::{non_empty, Cleanup, StorageOptions};
 
 /// The table URL of a location (a local path becomes a `file://` directory URL; nothing is
 /// created).
@@ -78,46 +78,6 @@ pub(crate) fn handle_in(
         b = b.with_storage_backend(super::faults::wrap(s), url);
     }
     Ok(b.build()?)
-}
-
-/// What a location holds.
-pub(crate) enum Layout {
-    Delta,
-    Lance,
-    None,
-}
-
-/// Whether `uri` holds a Delta table, a Lance dataset or neither (one listing).
-pub(crate) async fn layout(uri: &str, options: &StorageOptions) -> Result<Layout> {
-    if is_local(uri) {
-        let dir = std::path::Path::new(uri.strip_prefix("file://").unwrap_or(uri));
-        return Ok(if dir.join("_delta_log").is_dir() {
-            Layout::Delta
-        } else if dir.join("_versions").is_dir() {
-            Layout::Lance
-        } else {
-            Layout::None
-        });
-    }
-    let store = handle(uri, options)?.object_store();
-    let listed = match store.list_with_delimiter(None).await {
-        Ok(l) => l,
-        Err(ObjectStoreError::NotFound { .. }) => return Ok(Layout::None),
-        Err(e) => return Err(e.into()),
-    };
-    let has = |name: &str| {
-        listed
-            .common_prefixes
-            .iter()
-            .any(|p| p.filename() == Some(name))
-    };
-    Ok(if has("_delta_log") {
-        Layout::Delta
-    } else if has("_versions") {
-        Layout::Lance
-    } else {
-        Layout::None
-    })
 }
 
 /// A file of `_delta_log/`.

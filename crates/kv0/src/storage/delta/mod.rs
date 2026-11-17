@@ -28,9 +28,6 @@ pub(crate) mod take;
 
 use std::sync::Once;
 
-use crate::error::Result;
-use crate::storage::StorageOptions;
-
 /// Registers the object-store handlers of the cloud backends kv0 was built with, once. Done
 /// explicitly (not through the `deltalake` crate's load-time constructors) so it also works
 /// in a Python extension module.
@@ -62,50 +59,4 @@ pub(crate) fn not_found(e: &(dyn std::error::Error + 'static)) -> bool {
         cur = e.source();
     }
     false
-}
-
-/// Which engine holds (or will hold) the log at `uri`.
-///
-/// An existing location keeps its engine: a Delta log (`_delta_log/`) opens with Delta, a Lance
-/// dataset (`_versions/`) with Lance. A new location uses Delta when `KV0_TEST_BACKEND=delta`
-/// is set and Lance otherwise; the default switches to Delta once the Delta engine is complete.
-/// (Detection of every layout with clear errors, and a format marker, come later.)
-pub(crate) async fn chooses(uri: &str, options: &StorageOptions) -> Result<bool> {
-    let wanted = std::env::var("KV0_TEST_BACKEND").is_ok_and(|v| v == "delta");
-    if uri.starts_with("memory://") {
-        return Ok(wanted);
-    }
-    Ok(match table::layout(uri, options).await? {
-        table::Layout::Delta => true,
-        table::Layout::Lance => false,
-        table::Layout::None => wanted,
-    })
-}
-
-/// Whether the tracking repository at `uri` uses Delta tables: an existing repository keeps
-/// its engine (`runs/` with a Delta log: Delta; `runs.lance/`: Lance); a new one uses Delta
-/// when `KV0_TEST_BACKEND=delta` is set.
-pub(crate) async fn chooses_repo(uri: &str, options: &StorageOptions) -> Result<bool> {
-    let wanted = std::env::var("KV0_TEST_BACKEND").is_ok_and(|v| v == "delta");
-    if uri.starts_with("memory://") {
-        return Ok(wanted);
-    }
-    if crate::storage::is_local(uri) {
-        let dir = std::path::Path::new(uri.strip_prefix("file://").unwrap_or(uri));
-        return Ok(if dir.join("runs").join("_delta_log").is_dir() {
-            true
-        } else if dir.join("runs.lance").is_dir() {
-            false
-        } else {
-            wanted
-        });
-    }
-    let names = rows::list(uri, options, None).await?;
-    Ok(if names.iter().any(|n| n == "runs") {
-        true
-    } else if names.iter().any(|n| n == "runs.lance") {
-        false
-    } else {
-        wanted
-    })
 }

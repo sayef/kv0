@@ -165,9 +165,10 @@ pub(crate) trait OpLog: Send + Sync + 'static {
 /// log when there is none and `create` is set. `retention` and `mark_ttl` (how long writer marks
 /// are kept, where the engine keeps them itself) apply to a log created here.
 ///
-/// With the `delta` feature, a location that holds a Delta table opens with the Delta engine,
-/// one that holds a Lance dataset with Lance, and a new one with Delta when
-/// `KV0_TEST_BACKEND=delta` is set.
+/// An existing log opens with the engine it was written in; a new one with `engine`, else the
+/// one `KV0_ENGINE` names, else Lance. Asking for another engine than an existing log's fails
+/// (see [`super::format::choose`]).
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn open(
     uri: &str,
     options: &super::StorageOptions,
@@ -175,21 +176,24 @@ pub(crate) async fn open(
     create: bool,
     retention: Option<std::time::Duration>,
     mark_ttl: std::time::Duration,
+    engine: Option<super::Engine>,
 ) -> Result<Log> {
-    #[cfg(feature = "delta")]
-    if super::delta::chooses(uri, options).await? {
-        return super::delta::kv::open(uri, options, version, create, retention, mark_ttl).await;
+    use super::format::{choose, Kind};
+    let (engine, format) = choose(uri, options, Kind::Database, engine).await?;
+    match engine {
+        #[cfg(feature = "delta")]
+        super::Engine::Delta => {
+            let new = matches!(format, super::Format::Empty | super::Format::Unknown);
+            if new && create && version.is_none() {
+                super::format::write_marker(uri, options, Kind::Database).await?;
+            }
+            super::delta::kv::open(uri, options, version, create, retention, mark_ttl).await
+        }
+        #[cfg(not(feature = "delta"))]
+        super::Engine::Delta => unreachable!("choose refuses Delta without the feature"),
+        super::Engine::Lance => {
+            let _ = (mark_ttl, format);
+            super::lance::kv::open(uri, options, version, create, retention).await
+        }
     }
-    #[cfg(not(feature = "delta"))]
-    if super::list_dir(uri, options)
-        .await?
-        .iter()
-        .any(|n| n == "_delta_log")
-    {
-        return Err(crate::Error::NotSupported(format!(
-            "{uri} holds a Delta Lake table; this build of kv0 has only the Lance engine (enable the `delta` feature)"
-        )));
-    }
-    let _ = mark_ttl;
-    super::lance::kv::open(uri, options, version, create, retention).await
 }

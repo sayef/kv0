@@ -26,6 +26,36 @@ db = kv0.DB('s3://bucket/kv', storage_options={
 Do not put credentials in code you commit. Prefer the environment, instance roles or short-lived
 credentials.
 
+## Storage engines
+
+kv0 writes a location with one of two storage engines:
+
+- **Lance** (the default for now): Lance datasets, the format of kv0 0.1.0-beta.2 and earlier.
+- **Delta Lake** (delta-rs, the `delta` cargo feature): Delta tables. It becomes the default in a
+  later release, which converts existing locations with `kv0 migrate`.
+
+An existing location always opens with the engine it was written with. A new one uses the
+`engine` option (`"lance"` or `"delta"`), else the `KV0_ENGINE` environment variable, else Lance.
+Naming an engine that does not match an existing location fails: a Lance location asked to open
+with Delta Lake points to `kv0 migrate`, and the Lance engine refuses a Delta location. A build
+without the `delta` feature refuses Delta locations, and a database location opened as a
+tracking repository (or the reverse) fails as well.
+
+Delta locations carry a marker, `_kv0/format.json`, written when they are created:
+
+```json
+{"engine": "delta", "version": 1, "kind": "database", "created_by": "kv0 0.1.0-beta.3"}
+```
+
+Each table also records `kv0.format = delta/1` in its first commit. A marker or table from a newer
+format version, or a Delta table kv0 did not create, is refused rather than misread.
+`kv0::storage::detect(location, options)` reports what a location holds without opening it:
+empty, a database or a repository with its engine, or unknown.
+
+Old kv0 versions do not read the marker. Upgrade every process that opens a location before
+switching it to Delta Lake: kv0 0.1.0-beta.2 opening a Delta location would create a new Lance
+dataset next to it.
+
 ## The write-ahead log stays local
 
 Key-value writes are logged to a write-ahead log on the local disk (see the
