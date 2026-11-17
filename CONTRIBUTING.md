@@ -25,6 +25,14 @@ uv run --no-sync maturin develop --release
 uv run --no-sync pytest
 ```
 
+The key-value layer also runs on a Delta Lake engine (delta-rs without DataFusion), behind the
+`delta` feature, which needs Rust 1.95 or newer. New databases use it when `KV0_TEST_BACKEND=delta`
+is set; existing ones keep the engine they were created with. CI runs the suite both ways:
+
+```sh
+KV0_TEST_BACKEND=delta cargo test -p kv0 --features delta
+```
+
 Object-store tests run against any S3-compatible server. CI starts RustFS in Docker:
 
 ```sh
@@ -45,7 +53,7 @@ uv run mkdocs build --strict      # what CI runs: no warnings allowed
 
 - `crates/kv0`: the library. `src/kv` is the key-value layer (`view.rs` the in-memory ordered view,
   `store.rs` reading the operation log), `src/tracking` the tracking tables, `src/storage` locations,
-  object-store options and the storage engines (`oplog.rs` and `table.rs` the interfaces, `pred.rs` filters, `lance/` the Lance engine), `src/rt.rs` the Tokio runtime behind the blocking APIs.
+  object-store options and the storage engines (`oplog.rs` and `table.rs` the interfaces, `pred.rs` filters, `lance/` the Lance engine, `delta/` the Delta Lake engine of the key-value layer), `src/rt.rs` the Tokio runtime behind the blocking APIs.
 - `crates/kv0-py`: the Python bindings (PyO3), the pure-Python package in `python/kv0`, typed stubs
   and the Python tests.
 - `bench/`: the evaluation harness (`bench/eval/`), the key-value comparison with the SQLite-cache
@@ -71,13 +79,13 @@ pre-commit installs its own copies of ruff, typos, actionlint and zizmor, at the
 | --- | --- | --- |
 | Whitespace, YAML, TOML, merge markers | trailing whitespace, final newlines, line endings | pre-commit |
 | gitleaks | secrets in the tree (CI scans the whole history) | pre-commit |
-| `cargo fmt`, `cargo clippy` | Rust formatting and lints, warnings as errors | pre-commit, or `cargo fmt --all --check` and `cargo clippy --workspace --all-targets -- -D warnings` |
+| `cargo fmt`, `cargo clippy` | Rust formatting and lints, warnings as errors | pre-commit, or `cargo fmt --all --check` and `cargo clippy --workspace --all-targets -- -D warnings` (CI also with `--features kv0/delta`) |
 | ruff | Python lints and formatting | pre-commit, or `uv run --no-sync ruff check` and `uv run --no-sync ruff format --check` |
 | typos | spelling in code and docs; exclusions and allowed words in `_typos.toml` | pre-commit, or `uvx typos` |
 | actionlint, zizmor | GitHub Actions workflows: correctness and security | pre-commit, or `uvx zizmor --offline .github` |
 | `cargo machete` | unused Rust dependencies (CI only) | `cargo install cargo-machete && cargo machete` |
 | `cargo deny check` | licences, advisories and sources (CI only) | `cargo install cargo-deny && cargo deny check` |
-| Tests, MSRV, docs | Rust and Python tests, Rust 1.94.1, `mkdocs build --strict` | see the sections above |
+| Tests, MSRV, docs | Rust and Python tests, Rust 1.94.1 (1.95.0 with `delta`), `mkdocs build --strict` | see the sections above |
 
 The benchmark outputs (`bench/results/*.json`, `bench/eval/charts/*.svg`, `bench/REPORT.md`) are generated,
 but they pass the same whitespace hooks: regenerate them rather than editing them by hand. If ruff and
