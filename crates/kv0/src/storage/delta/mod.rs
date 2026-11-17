@@ -2,7 +2,8 @@
 //!
 //! delta-rs provides commits with optimistic concurrency, the log, time travel and a Parquet
 //! writer. kv0 adds the rest here: scans ([`scan`]), reads by row ordinal ([`take`]), rewrites
-//! ([`commit`]), tags and cleanup ([`table`]).
+//! ([`commit`]), tags and cleanup ([`table`]), and the tables of the tracking layer ([`rows`],
+//! with predicates evaluated by [`filter`]).
 //!
 //! Rules every writer here follows:
 //!
@@ -15,9 +16,11 @@
 
 pub(crate) mod commit;
 pub(crate) mod create;
+pub(crate) mod filter;
 pub(crate) mod footer_cache;
 pub(crate) mod kv;
 pub(crate) mod props;
+pub(crate) mod rows;
 pub(crate) mod scan;
 pub(crate) mod table;
 pub(crate) mod take;
@@ -75,5 +78,33 @@ pub(crate) async fn chooses(uri: &str, options: &StorageOptions) -> Result<bool>
         table::Layout::Delta => true,
         table::Layout::Lance => false,
         table::Layout::None => wanted,
+    })
+}
+
+/// Whether the tracking repository at `uri` uses Delta tables: an existing repository keeps
+/// its engine (`runs/` with a Delta log: Delta; `runs.lance/`: Lance); a new one uses Delta
+/// when `KV0_TEST_BACKEND=delta` is set.
+pub(crate) async fn chooses_repo(uri: &str, options: &StorageOptions) -> Result<bool> {
+    let wanted = std::env::var("KV0_TEST_BACKEND").is_ok_and(|v| v == "delta");
+    if uri.starts_with("memory://") {
+        return Ok(wanted);
+    }
+    if crate::storage::is_local(uri) {
+        let dir = std::path::Path::new(uri.strip_prefix("file://").unwrap_or(uri));
+        return Ok(if dir.join("runs").join("_delta_log").is_dir() {
+            true
+        } else if dir.join("runs.lance").is_dir() {
+            false
+        } else {
+            wanted
+        });
+    }
+    let names = rows::list(uri, options, None).await?;
+    Ok(if names.iter().any(|n| n == "runs") {
+        true
+    } else if names.iter().any(|n| n == "runs.lance") {
+        false
+    } else {
+        wanted
     })
 }

@@ -6,7 +6,8 @@
 //! usual environment variables (`AWS_*`, `GOOGLE_*`, `AZURE_*`).
 //!
 //! The key-value layer reaches storage only through [`oplog::OpLog`], the tracking layer only
-//! through [`table::Table`] with [`pred::Pred`] filters; [`lance`] implements both.
+//! through [`table::Table`] with [`pred::Pred`] filters (a repository's tables through
+//! [`table::Root`]); [`lance`] implements both, and so does `delta` with the `delta` feature.
 
 use std::collections::HashMap;
 use std::path::Path;

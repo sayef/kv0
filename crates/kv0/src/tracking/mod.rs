@@ -46,9 +46,9 @@ use crate::kv::view::Op;
 use crate::kv::wal::{self, Wal};
 pub use crate::kv::WalSync;
 use crate::rt;
-use crate::storage::oplog::FileId;
+use crate::storage::oplog::{FileId, WriterMark};
 use crate::storage::pred::{Cmp, Lit, Pred};
-use crate::storage::table::{self as tbl, FileTag, Scan, TableRef};
+use crate::storage::table::{self as tbl, FileTag, Root, Scan, TableRef};
 use crate::storage::types::{seq_from_i64, seq_to_i64, series_from_i64, series_to_i64};
 use crate::storage::{self, StorageOptions};
 
@@ -423,6 +423,8 @@ struct Tables {
 /// State shared by a repository handle, its runs and the background flusher.
 struct Core {
     uri: String,
+    /// Where the tables are, in which engine.
+    root: Root,
     opts: RepoOptions,
     closed: AtomicBool,
     buffers: parking_lot::Mutex<Buffers>,
@@ -479,17 +481,17 @@ impl std::fmt::Debug for Repo {
 }
 
 async fn open_table(
-    root: &str,
+    root: &Root,
     name: &str,
     schema: SchemaRef,
     opts: &RepoOptions,
 ) -> Result<TableRef> {
-    storage::table::open(
-        &storage::join(root, &format!("{name}.lance")),
-        &opts.storage_options,
+    root.table(
+        name,
         schema,
         opts.create_if_missing,
         opts.version_retention,
+        opts.mark_ttl,
     )
     .await
 }
@@ -775,18 +777,25 @@ fn writer_hash(writer: &str) -> i64 {
 /// Appends each non-empty buffer as one commit, clearing what was written. Series are written
 /// before their points, so a reader never sees points of a series it cannot name.
 ///
-/// With a WAL writer, each table's commit also holds a mark row: the writer has committed every
-/// write of that table's kind up to sequence number `upto`.
+/// With a WAL writer, each table's commit also holds a mark: the writer has committed every
+/// write of that table's kind up to sequence number `upto`. An engine that keeps marks itself
+/// commits it with the rows ([`tbl::Table::keeps_marks`]); otherwise it is a mark row.
 async fn write_all(
     t: &mut Tables,
     left: &mut Buffers,
     mark: Option<(&str, u64)>,
     deltas: &[(u64, stats::Delta)],
 ) -> Result<()> {
-    let mark_id = mark.map(|(w, _)| format!("{MARK_PREFIX}{w}"));
+    let engine_mark = mark.map(|(w, upto)| WriterMark {
+        writer: w.to_string(),
+        seq: upto,
+    });
+    // Mark rows only where the engine does not keep marks.
+    let row_mark = mark.filter(|_| !t.runs.keeps_marks());
+    let mark_id = row_mark.map(|(w, _)| format!("{MARK_PREFIX}{w}"));
     if !left.runs.is_empty() {
         let mut rows = left.runs.clone();
-        if let (Some(id), Some((_, upto))) = (&mark_id, mark) {
+        if let (Some(id), Some((_, upto))) = (&mark_id, row_mark) {
             let now = now_micros();
             rows.push((
                 upto,
@@ -807,20 +816,24 @@ async fn write_all(
                 fields::ALL,
             ));
         }
-        t.runs.append(vec![runs_batch(&rows)?]).await?;
+        t.runs
+            .append(vec![runs_batch(&rows)?], engine_mark.clone())
+            .await?;
         left.runs.clear();
     }
     if !left.params.is_empty() {
         let mut rows = left.params.clone();
-        if let (Some(id), Some((_, upto))) = (&mark_id, mark) {
+        if let (Some(id), Some((_, upto))) = (&mark_id, row_mark) {
             rows.push((upto, id.clone(), String::new(), Value::Null));
         }
-        t.params.append(vec![params_batch(&rows)?]).await?;
+        t.params
+            .append(vec![params_batch(&rows)?], engine_mark.clone())
+            .await?;
         left.params.clear();
     }
     if !left.series.is_empty() {
         let mut rows = left.series.clone();
-        if let (Some(id), Some((_, upto))) = (&mark_id, mark) {
+        if let (Some(id), Some((_, upto))) = (&mark_id, row_mark) {
             rows.push(SeriesInfo {
                 series_id: 0,
                 run_id: id.clone(),
@@ -829,7 +842,9 @@ async fn write_all(
                 created_at: now_micros(),
             });
         }
-        t.series.append(vec![series_batch(&rows)?]).await?;
+        t.series
+            .append(vec![series_batch(&rows)?], engine_mark.clone())
+            .await?;
         left.series.clear();
     }
     if !left.series_ids.is_empty() || !deltas.is_empty() {
@@ -841,7 +856,7 @@ async fn write_all(
             values: left.values.clone(),
             ..Default::default()
         };
-        if let Some((w, upto)) = mark {
+        if let Some((w, upto)) = row_mark {
             pts.series_ids.push(0);
             pts.steps.push(upto as i64);
             pts.epochs.push(Some(writer_hash(w)));
@@ -853,7 +868,7 @@ async fn write_all(
         if !deltas.is_empty() {
             batches.push(deltas_batch(deltas)?);
         }
-        t.metrics.append(batches).await?;
+        t.metrics.append(batches, engine_mark).await?;
         left.relogged.clear();
         left.series_ids.clear();
         left.steps.clear();
@@ -867,6 +882,16 @@ async fn write_all(
 /// Per-table WAL marks of `writer`: the highest committed sequence number of runs, params,
 /// series and metric points.
 async fn marks_of(t: &Tables, writer: &str) -> Result<[u64; 4]> {
+    if t.runs.keeps_marks() {
+        let mut out = [0; 4];
+        for (i, ds) in [&t.runs, &t.params, &t.series, &t.metrics]
+            .into_iter()
+            .enumerate()
+        {
+            out[i] = ds.writer_mark(writer).await?.unwrap_or(0);
+        }
+        return Ok(out);
+    }
     let id = format!("{MARK_PREFIX}{writer}");
     let max_seq = |batches: Vec<RecordBatch>| -> Result<u64> {
         let mut m = 0;
@@ -1298,6 +1323,9 @@ async fn exact_from_points(
 /// Deletes WAL mark rows that are no longer needed: all but each writer's newest, and every
 /// mark older than `ttl`. One delete per table, only when there is something to delete.
 async fn prune_marks(t: &mut Tables, ttl: Duration) -> Result<()> {
+    if t.runs.keeps_marks() {
+        return Ok(()); // the engine expires them
+    }
     let cutoff = now_nanos().saturating_sub(ttl.as_nanos() as u64);
     let like = Pred::StartsWith("run_id", MARK_PREFIX.to_string());
     // runs and params carry the sequence number in `seq`.
@@ -1972,11 +2000,11 @@ impl Core {
         }
         let create = create && self.opts.create_if_missing;
         match records::open(
-            &self.uri,
+            &self.root,
             table,
-            &self.opts.storage_options,
             create,
             self.opts.version_retention,
+            self.opts.mark_ttl,
         )
         .await
         {
@@ -1999,10 +2027,7 @@ impl Core {
 
     /// Every records table, at its latest version.
     async fn all_record_ds(&self) -> Result<Vec<(String, TableRef)>> {
-        let mut names: HashSet<String> = records::tables(&self.uri, &self.opts.storage_options)
-            .await?
-            .into_iter()
-            .collect();
+        let mut names: HashSet<String> = records::tables(&self.root).await?.into_iter().collect();
         names.extend(self.records.lock().await.keys().cloned());
         let mut names: Vec<String> = names.into_iter().collect();
         names.sort();
@@ -2100,7 +2125,7 @@ impl Core {
                 })
                 .collect()
         };
-        t.runs.append(vec![runs_batch(&rows)?]).await?;
+        t.runs.append(vec![runs_batch(&rows)?], None).await?;
         self.deleted.lock().extend(run_ids.iter().cloned());
         let series: Vec<u64> = read_series_rows(&scan(&t.series, Some(pred.clone())).await?)?
             .into_iter()
@@ -2441,7 +2466,11 @@ impl Repo {
     /// Opens (or creates) a repository at `location`: a local path or any URI Lance supports.
     pub async fn open(location: &str, opts: RepoOptions) -> Result<Repo> {
         let uri = storage::normalize_uri(location)?;
-        {
+        let root = {
+            let (u, o) = (uri.clone(), opts.storage_options.clone());
+            rt::spawn(async move { Root::open(&u, &o).await }).await?
+        };
+        if !root.is_delta() {
             let (u, o) = (uri.clone(), opts.storage_options.clone());
             let moved = rt::spawn(async move { records::migrate_paths(&u, &o).await }).await?;
             if !moved.is_empty() {
@@ -2449,29 +2478,32 @@ impl Repo {
             }
         }
         if opts.legacy_records == LegacyRecords::Error {
-            let (u, o) = (uri.clone(), opts.storage_options.clone());
-            let names = rt::spawn(async move { storage::list_dir(&u, &o).await }).await?;
-            if names.iter().any(|n| n == records::LEGACY) {
+            let r = root.clone();
+            let found = rt::spawn(async move { r.exists(r.legacy_records()).await }).await?;
+            if found {
                 return Err(Error::InvalidArgument(format!(
                     "{uri} has records in the shared {} of an earlier build, which this build \
                      does not read. Open with legacy_records Allow, read them with \
                      legacy_records(), append them to tables, then drop_legacy_records()",
-                    records::LEGACY
+                    root.location(root.legacy_records())
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or_default()
                 )));
             }
         }
         let tables = {
-            let (uri, opts) = (uri.clone(), opts.clone());
+            let (root, opts) = (root.clone(), opts.clone());
             rt::spawn(async move {
-                let mut runs = open_table(&uri, "runs", schema::RUNS.clone(), &opts).await?;
+                let mut runs = open_table(&root, "runs", schema::RUNS.clone(), &opts).await?;
                 upgrade(&mut runs, &schema::RUNS_ADDED).await?;
                 let mut metrics =
-                    open_table(&uri, "metrics", schema::METRICS.clone(), &opts).await?;
+                    open_table(&root, "metrics", schema::METRICS.clone(), &opts).await?;
                 upgrade(&mut metrics, &schema::METRICS_ADDED).await?;
                 Ok::<_, Error>(Tables {
                     runs,
-                    params: open_table(&uri, "params", schema::PARAMS.clone(), &opts).await?,
-                    series: open_table(&uri, "series", schema::SERIES.clone(), &opts).await?,
+                    params: open_table(&root, "params", schema::PARAMS.clone(), &opts).await?,
+                    series: open_table(&root, "series", schema::SERIES.clone(), &opts).await?,
                     metrics,
                 })
             })
@@ -2555,6 +2587,7 @@ impl Repo {
         let batch_sync = log.is_some() && opts.wal_sync == WalSync::Batch;
         let core = Arc::new(Core {
             uri,
+            root,
             closed: AtomicBool::new(false),
             buffers: parking_lot::Mutex::new(buffers),
             known_series: parking_lot::Mutex::new(known),
@@ -2817,38 +2850,22 @@ impl Repo {
     /// Every row of the shared `records.lance` of earlier builds (of table `table`, or all),
     /// in append order, for a one-time migration; empty when there is none.
     pub async fn legacy_records(&self, table: Option<&str>) -> Result<Vec<Record>> {
-        let (uri, o, table) = (
-            self.inner.core.uri.clone(),
-            self.inner.core.opts.storage_options.clone(),
-            table.map(str::to_string),
-        );
-        rt::spawn(async move { records::read_legacy(&uri, &o, table.as_deref()).await }).await
+        let (root, table) = (self.inner.core.root.clone(), table.map(str::to_string));
+        rt::spawn(async move { records::read_legacy(&root, table.as_deref()).await }).await
     }
 
     /// Whether the shared `records.lance` of earlier builds exists; one directory listing, no
     /// rows read.
     pub async fn has_legacy_records(&self) -> Result<bool> {
-        let (uri, o) = (
-            self.inner.core.uri.clone(),
-            self.inner.core.opts.storage_options.clone(),
-        );
-        rt::spawn(async move {
-            Ok(storage::list_dir(&uri, &o)
-                .await?
-                .iter()
-                .any(|n| n == records::LEGACY))
-        })
-        .await
+        let root = self.inner.core.root.clone();
+        rt::spawn(async move { root.exists(root.legacy_records()).await }).await
     }
 
     /// Deletes the shared `records.lance` of earlier builds, after a migration. Returns
     /// whether there was one.
     pub async fn drop_legacy_records(&self) -> Result<bool> {
-        let (uri, o) = (
-            self.inner.core.uri.clone(),
-            self.inner.core.opts.storage_options.clone(),
-        );
-        rt::spawn(async move { records::drop_legacy(&uri, &o).await }).await
+        let root = self.inner.core.root.clone();
+        rt::spawn(async move { records::drop_legacy(&root).await }).await
     }
 
     /// Names of the records tables.
@@ -2995,6 +3012,28 @@ impl Repo {
             let mut t = core.tables.lock().await;
             t.metrics.latest().await?;
             t.metrics.count(Some(Pred::IsNull("stats"))).await
+        })
+        .await
+    }
+
+    /// Stored rows of table `name` (`runs`, `params`, `series` or `metrics`), every kind of
+    /// row included (diagnostics and tests).
+    #[doc(hidden)]
+    pub async fn table_rows(&self, name: &str) -> Result<usize> {
+        let (core, name) = (self.core(), name.to_string());
+        rt::spawn(async move {
+            core.flush().await?;
+            let mut t = core.tables.lock().await;
+            let t = &mut *t;
+            let ds = match name.as_str() {
+                "runs" => &mut t.runs,
+                "params" => &mut t.params,
+                "series" => &mut t.series,
+                "metrics" => &mut t.metrics,
+                other => return Err(Error::InvalidArgument(format!("no table {other:?}"))),
+            };
+            ds.latest().await?;
+            ds.count(None).await
         })
         .await
     }
@@ -3501,5 +3540,172 @@ mod fold_tests {
             };
             assert_eq!(strip(folded), strip(unfolded), "case {case}");
         }
+    }
+
+    /// After `optimize` sorts the points, a read of one series reads one file and the row
+    /// groups that hold it: the unsorted files and the other row groups are skipped by their
+    /// statistics.
+    #[cfg(feature = "delta")]
+    #[test]
+    fn series_reads_after_optimize_skip_files_and_row_groups() {
+        let d = tempfile::tempdir().unwrap();
+        let uri = d.path().join("repo").to_string_lossy().into_owned();
+        // A Delta repository: its runs table decides the engine.
+        let runs = storage::join(&uri, "runs");
+        rt::block_on(async move {
+            crate::storage::delta::rows::open(
+                &runs,
+                &StorageOptions::new(),
+                None,
+                schema::RUNS.clone(),
+                true,
+                None,
+                Duration::from_secs(3600),
+            )
+            .await
+        })
+        .unwrap();
+        let opts = RepoOptions {
+            flush_interval: None,
+            wal: false,
+            max_fragments: 0,
+            ..RepoOptions::default()
+        };
+        let repo = {
+            let (u, o) = (uri.clone(), opts.clone());
+            rt::block_on(async move { Repo::open(&u, o).await }).unwrap()
+        };
+        let pts: Vec<TrackPoint> = (0..4000)
+            .map(|i| TrackPoint {
+                value: i as f64,
+                step: Some(i),
+                epoch: None,
+                timestamp: Some(1),
+            })
+            .collect();
+        for r in 0..40 {
+            let run = repo
+                .create_run(NewRun {
+                    run_id: Some(format!("r{r}")),
+                    ..NewRun::default()
+                })
+                .unwrap();
+            run.track_many("loss", None, &pts).unwrap();
+            let rr = repo.clone();
+            rt::block_on(async move { rr.flush().await }).unwrap();
+        }
+        let rr = repo.clone();
+        rt::block_on(async move { rr.optimize().await }).unwrap();
+        // Points logged after optimize stay in a small unsorted file.
+        let late = repo
+            .create_run(NewRun {
+                run_id: Some("late".into()),
+                ..NewRun::default()
+            })
+            .unwrap();
+        late.track_many("loss", None, &pts[..10]).unwrap();
+        let rr = repo.clone();
+        rt::block_on(async move { rr.flush().await }).unwrap();
+        let counts = || {
+            let core = repo.core();
+            rt::block_on(async move {
+                Ok::<_, Error>(core.tables.lock().await.metrics.pruning().expect("delta"))
+            })
+            .unwrap()
+        };
+        let before = counts();
+        let rr = repo.clone();
+        let got = rt::block_on(async move {
+            rr.read_metric(
+                "r7",
+                "loss",
+                &Value::Object(Default::default()),
+                StepRange {
+                    start: Some(100),
+                    stop: Some(200),
+                },
+            )
+            .await
+        })
+        .unwrap();
+        assert_eq!(got.steps, (100..200).collect::<Vec<i64>>());
+        let after = counts();
+        let d: Vec<u64> = (0..4).map(|i| after[i] - before[i]).collect();
+        // [files read, files skipped, row groups read, row groups skipped]
+        assert_eq!(d[0], 1, "{d:?}");
+        assert!(d[1] >= 1, "the unsorted file is skipped: {d:?}");
+        // 160k sorted points are three row groups; one series lies in one, or across two.
+        assert!(d[2] <= 2 && d[3] >= 1, "{d:?}");
+    }
+
+    /// A Delta repository's legacy records live in `_legacy_records/` (written by a
+    /// migration): refused by default, readable and droppable with `LegacyRecords::Allow`.
+    #[cfg(feature = "delta")]
+    #[test]
+    fn delta_legacy_records_are_read_and_dropped() {
+        let d = tempfile::tempdir().unwrap();
+        let uri = d.path().join("repo").to_string_lossy().into_owned();
+        let u = uri.clone();
+        rt::block_on(async move {
+            let o = StorageOptions::new();
+            let ttl = Duration::from_secs(3600);
+            let runs = storage::join(&u, "runs");
+            crate::storage::delta::rows::open(
+                &runs,
+                &o,
+                None,
+                schema::RUNS.clone(),
+                true,
+                None,
+                ttl,
+            )
+            .await?;
+            let root = Root::open(&u, &o).await?;
+            assert!(root.is_delta());
+            let mut legacy = root
+                .table(
+                    root.legacy_records(),
+                    records::RECORDS.clone(),
+                    true,
+                    None,
+                    ttl,
+                )
+                .await?;
+            let rows = [NewRecord {
+                item_id: "a".into(),
+                run_id: Some("r1".into()),
+                data: serde_json::json!({ "s": 2 }),
+            }];
+            legacy
+                .append(vec![records::batch("scores", &rows, &[5], 7)?], None)
+                .await?;
+            Ok::<_, Error>(())
+        })
+        .unwrap();
+        let open = |legacy: LegacyRecords| {
+            let o = RepoOptions {
+                flush_interval: None,
+                wal: false,
+                legacy_records: legacy,
+                ..RepoOptions::default()
+            };
+            let u = uri.clone();
+            rt::block_on(async move { Repo::open(&u, o).await })
+        };
+        let e = open(LegacyRecords::Error).unwrap_err();
+        assert!(e.to_string().contains("_legacy_records"), "{e}");
+        let repo = open(LegacyRecords::Allow).unwrap();
+        let got = rt::block_on(async move {
+            assert!(repo.has_legacy_records().await?);
+            let all = repo.legacy_records(Some("scores")).await?;
+            assert!(repo.drop_legacy_records().await?);
+            assert!(!repo.has_legacy_records().await?);
+            Ok::<_, Error>(all)
+        })
+        .unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].seq, 5);
+        assert_eq!(got[0].run_id.as_deref(), Some("r1"));
+        open(LegacyRecords::Error).unwrap();
     }
 }

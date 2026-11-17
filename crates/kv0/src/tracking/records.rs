@@ -21,7 +21,7 @@ use serde_json::Value;
 use crate::error::{Error, Result};
 use crate::storage::oplog::FileId;
 use crate::storage::pred::Pred;
-use crate::storage::table::{Scan, TableRef};
+use crate::storage::table::{Root, Scan, TableRef};
 use crate::storage::types::{logical_schema, seq_from_i64, seq_to_i64};
 use crate::storage::{self, StorageOptions};
 pub static RECORDS: LazyLock<SchemaRef> = LazyLock::new(|| {
@@ -213,17 +213,18 @@ pub(crate) async fn migrate_paths(root: &str, opts: &StorageOptions) -> Result<V
 
 pub(crate) const DIR: &str = "records";
 
-/// The dataset earlier builds kept every table in.
-pub(crate) const LEGACY: &str = "records.lance";
-
-/// Every row of the legacy dataset (of `table`, or all), in append order.
-pub(crate) async fn read_legacy(
-    root: &str,
-    opts: &StorageOptions,
-    table: Option<&str>,
-) -> Result<Vec<Record>> {
-    let uri = storage::join(root, LEGACY);
-    let ds = match storage::table::open(&uri, opts, RECORDS.clone(), false, None).await {
+/// Every row of the legacy table (of `table`, or all), in append order.
+pub(crate) async fn read_legacy(root: &Root, table: Option<&str>) -> Result<Vec<Record>> {
+    let ds = match root
+        .table(
+            root.legacy_records(),
+            RECORDS.clone(),
+            false,
+            None,
+            NO_MARKS,
+        )
+        .await
+    {
         Ok(ds) => ds,
         Err(Error::NotFound(_)) => return Ok(Vec::new()),
         Err(e) => return Err(e),
@@ -252,46 +253,58 @@ pub(crate) async fn read_legacy(
     Ok(out)
 }
 
-/// Deletes the legacy dataset. Returns whether there was one.
-pub(crate) async fn drop_legacy(root: &str, opts: &StorageOptions) -> Result<bool> {
-    let uri = storage::join(root, LEGACY);
-    match storage::table::open(&uri, opts, RECORDS.clone(), false, None).await {
+/// Deletes the legacy table. Returns whether there was one.
+pub(crate) async fn drop_legacy(root: &Root) -> Result<bool> {
+    match root
+        .table(
+            root.legacy_records(),
+            RECORDS.clone(),
+            false,
+            None,
+            NO_MARKS,
+        )
+        .await
+    {
         Ok(_) => {}
         Err(Error::NotFound(_)) => return Ok(false),
         Err(e) => return Err(e),
     }
-    storage::remove_dir(&uri, opts).await?;
+    root.remove(root.legacy_records()).await?;
     Ok(true)
 }
 
+/// Records tables carry no writer marks; this only fills the parameter.
+const NO_MARKS: std::time::Duration = std::time::Duration::from_secs(30 * 24 * 3600);
+
 pub(crate) async fn open(
-    root: &str,
+    root: &Root,
     table: &str,
-    opts: &StorageOptions,
     create: bool,
     retention: Option<std::time::Duration>,
+    mark_ttl: std::time::Duration,
 ) -> Result<TableRef> {
     if table.is_empty() {
         return Err(Error::InvalidArgument(
             "a records table needs a name".into(),
         ));
     }
-    storage::table::open(
-        &storage::join(root, &format!("{DIR}/{}.lance", encode(table))),
-        opts,
+    root.table(
+        &format!("{DIR}/{}", encode(table)),
         RECORDS.clone(),
         create,
         retention,
+        mark_ttl,
     )
     .await
 }
 
 /// Names of the tables stored under `root`.
-pub(crate) async fn tables(root: &str, opts: &StorageOptions) -> Result<Vec<String>> {
-    let names = storage::list_dir(&storage::join(root, DIR), opts).await?;
-    Ok(names
+pub(crate) async fn tables(root: &Root) -> Result<Vec<String>> {
+    Ok(root
+        .tables(DIR)
+        .await?
         .iter()
-        .filter_map(|n| n.strip_suffix(".lance").and_then(decode))
+        .filter_map(|n| decode(n))
         .collect())
 }
 
@@ -326,7 +339,7 @@ pub(crate) fn batch(
 }
 
 pub(crate) async fn append(ds: &mut TableRef, b: RecordBatch) -> Result<u64> {
-    ds.append(vec![b]).await?;
+    ds.append(vec![b], None).await?;
     Ok(ds.version())
 }
 
