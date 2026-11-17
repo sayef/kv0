@@ -361,7 +361,7 @@ impl RowTable {
                 Err(Error::Conflict(m)) if attempt + 1 < REWRITE_ATTEMPTS => {
                     attempt += 1;
                     tracing::debug!(uri = %self.shared.uri, attempt, error = %m, "kv0: rewrite conflicted; planning it again");
-                    tokio::time::sleep(backoff(attempt, 100, 5_000)).await;
+                    tokio::time::sleep(crate::storage::backoff(attempt, 100, 5_000)).await;
                     let t = self.load_latest().await?;
                     self.moved(t)?;
                 }
@@ -496,17 +496,10 @@ impl RowTable {
             if !matches!(err, Error::Conflict(_)) || attempt >= APPEND_ATTEMPTS {
                 return Err(err);
             }
-            tokio::time::sleep(backoff(attempt, 50, 800)).await;
+            tokio::time::sleep(crate::storage::backoff(attempt, 50, 800)).await;
             self.moved(latest)?;
         }
     }
-}
-
-/// A jittered exponential backoff: about `base` ms doubled per attempt, at most `max` ms.
-fn backoff(attempt: u32, base: u64, max: u64) -> Duration {
-    let ms = base.saturating_mul(1 << attempt.min(16)).min(max);
-    let jitter = (next_order().unsigned_abs() % 1000) as f64 / 1000.0;
-    Duration::from_millis((ms as f64 * (0.5 + jitter / 2.0)) as u64)
 }
 
 /// `add` carrying `tags` (and nothing else of the source's tags).
@@ -990,8 +983,12 @@ impl Table for RowTable {
         async { Ok(()) }.boxed()
     }
 
-    fn cleanup(&self, before: chrono::DateTime<chrono::Utc>) -> BoxFuture<'_, Result<(u64, u64)>> {
-        table::cleanup(&self.table, before).boxed()
+    fn cleanup(&self, c: crate::storage::Cleanup) -> BoxFuture<'_, Result<(u64, u64)>> {
+        table::cleanup(&self.table, c).boxed()
+    }
+
+    fn needs_cleanup_cadence(&self) -> bool {
+        true
     }
 
     fn tags(&self) -> BoxFuture<'_, Result<Vec<(String, u64)>>> {

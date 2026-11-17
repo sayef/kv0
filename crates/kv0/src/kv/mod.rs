@@ -62,10 +62,16 @@ pub struct Options {
     /// Keep delete markers this long when compacting, so a slower concurrent writer's older
     /// write to the same key stays deleted. Default 1 h.
     pub tombstone_grace: Duration,
-    /// When creating the database, enable Lance's automatic cleanup of versions older than this
-    /// (checked every 20 commits). `None` keeps every version until
-    /// [`Db::cleanup_old_versions`]. Default 7 days.
+    /// Delete versions older than this automatically, checked every 20 commits. Lance databases
+    /// take it when created (Lance runs the cleanup); Delta Lake databases take it from each
+    /// writing handle, which runs the cleanup in the background. `None` keeps every version
+    /// until [`Db::cleanup_old_versions`]. Default 7 days.
     pub version_retention: Option<Duration>,
+    /// Version cleanup and purge delete data files that no version references (left by a
+    /// writer that crashed before committing) only once they are older than this, since a
+    /// running writer may be about to commit them. Keep it above the longest a commit can take.
+    /// Used by the Delta Lake engine; Lance tracks its files itself. Default 1 h.
+    pub orphan_grace: Duration,
     /// Log every write to a local write-ahead log before acknowledging it, so buffered writes
     /// survive a process crash. Ignored for read-only handles and `memory://`. Default `true`.
     pub wal: bool,
@@ -107,6 +113,7 @@ impl Default for Options {
             max_fragments: 32,
             tombstone_grace: Duration::from_secs(3600),
             version_retention: Some(Duration::from_secs(7 * 24 * 3600)),
+            orphan_grace: Duration::from_secs(3600),
             wal: true,
             wal_sync: WalSync::Batch,
             wal_dir: None,
@@ -243,6 +250,22 @@ struct Inner {
     snapshot_version: AtomicU64,
     /// This handle started from a snapshot.
     from_snapshot: bool,
+    /// Commits this handle made, for the cleanup cadence.
+    commits: AtomicU64,
+    /// A background version cleanup is running.
+    cleaning: Arc<AtomicBool>,
+}
+
+/// Own commits between automatic version cleanups (as Lance's automatic cleanup).
+pub(crate) const CLEANUP_EVERY: u64 = 20;
+
+/// Clears a flag however the task holding it ends (error, panic or a dropped task).
+pub(crate) struct ClearOnDrop(pub(crate) Arc<AtomicBool>);
+
+impl Drop for ClearOnDrop {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
 }
 
 /// A read of a stored value in progress.
@@ -439,6 +462,8 @@ impl Db {
             snapshot_path,
             snapshot_version: AtomicU64::new(snapshot_version.unwrap_or(0)),
             from_snapshot: snapshot_version.is_some(),
+            commits: AtomicU64::new(0),
+            cleaning: Arc::new(AtomicBool::new(false)),
             opts,
         });
         for o in orphans {
@@ -680,7 +705,8 @@ impl Db {
         let cutoff = chrono::Utc::now()
             - chrono::Duration::from_std(older_than)
                 .map_err(|e| Error::InvalidArgument(e.to_string()))?;
-        let (_, bytes) = rt::block_on(async move { log.cleanup(cutoff).await })?;
+        let c = storage::Cleanup::before(cutoff, self.inner.opts.orphan_grace);
+        let (_, bytes) = rt::block_on(async move { log.cleanup(c).await })?;
         Ok(bytes)
     }
 
@@ -724,11 +750,9 @@ impl Db {
         let log = self.inner.persist.lock().log.clone();
         let now = store::file_ids(log.as_ref());
         report.fragments_rewritten = before.iter().filter(|id| !now.contains(id)).count();
-        let (v, b) = rt::block_on(async move {
-            // Every version but the latest and tagged ones.
-            log.cleanup(chrono::Utc::now() + chrono::Duration::seconds(1))
-                .await
-        })?;
+        let erase = storage::Cleanup::erase(self.inner.opts.orphan_grace);
+        // Every version but the latest and tagged ones.
+        let (v, b) = rt::block_on(async move { log.cleanup(erase).await })?;
         report.versions_removed = v;
         report.bytes_removed = b;
         // A write that overwrote a tagged key while this ran leaves a tag holding data purge
@@ -867,6 +891,38 @@ impl Inner {
         self.version.store(log.version(), Ordering::Release);
     }
 
+    /// Counts an own commit and, every [`CLEANUP_EVERY`] of them, starts a background cleanup
+    /// of versions older than `version_retention` when the engine leaves that to kv0. At most
+    /// one runs per handle; concurrent cleanups from other handles are harmless.
+    fn after_commit(&self, log: &Log) {
+        let Some(retention) = self.opts.version_retention else {
+            return;
+        };
+        if !log.needs_cleanup_cadence()
+            || !(self.commits.fetch_add(1, Ordering::Relaxed) + 1).is_multiple_of(CLEANUP_EVERY)
+        {
+            return;
+        }
+        let Ok(age) = chrono::Duration::from_std(retention) else {
+            return;
+        };
+        if self.cleaning.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let c = storage::Cleanup::before(chrono::Utc::now() - age, self.opts.orphan_grace);
+        let (log, uri) = (log.clone(), self.uri.clone());
+        let flag = ClearOnDrop(self.cleaning.clone());
+        rt::detach(async move {
+            let _flag = flag;
+            match log.cleanup(c).await {
+                Ok((versions, bytes)) => {
+                    tracing::debug!(uri = %uri, versions, bytes, "kv0: cleaned up old versions");
+                }
+                Err(e) => tracing::debug!(uri = %uri, error = %e, "kv0: version cleanup failed"),
+            }
+        });
+    }
+
     fn check_open(&self) -> Result<()> {
         if self.closed.load(Ordering::Acquire) {
             Err(Error::InvalidArgument("the database is closed".into()))
@@ -935,6 +991,7 @@ impl Inner {
                 }
                 self.publish(&after);
                 self.take_in(&mut self.state.write(), &after, u.rows, u.moved);
+                self.after_commit(&after);
                 p.log = after;
                 p.applied = u.ids;
                 // The writes are committed; a failed automatic compaction (for example one that
@@ -982,6 +1039,7 @@ impl Inner {
                 let u = store::unseen(before, &log, &applied, true, lazy, relocate).await?;
                 Ok::<_, Error>((log, u))
             })?;
+            self.after_commit(&log);
             self.absorb(p, log, u);
             Ok(())
         }
@@ -1019,6 +1077,7 @@ impl Inner {
             let u = store::unseen(before, &after, &applied, true, lazy, relocate).await?;
             Ok::<_, Error>((after, u))
         })?;
+        self.after_commit(&log);
         self.absorb(p, log, u);
         self.state.write().view.prune(keep_after, marks_after);
         Ok(true)

@@ -22,11 +22,7 @@ use url::Url;
 
 use crate::error::{Error, Result};
 use crate::kv::VersionInfo;
-use crate::storage::{is_local, non_empty, StorageOptions};
-
-/// Unreferenced files younger than this are never deleted: a writer may still be about to
-/// commit them.
-const INFLIGHT_GRACE: chrono::Duration = chrono::Duration::hours(1);
+use crate::storage::{is_local, non_empty, Cleanup, StorageOptions};
 
 /// The table URL of a location (a local path becomes a `file://` directory URL; nothing is
 /// created).
@@ -330,25 +326,106 @@ pub(crate) async fn delete_tag(table: &DeltaTable, tag: &str) -> Result<()> {
     }
 }
 
-/// Removes versions committed before `before` and the data files only they use. The latest
+/// Paths of the data files `version` of the table references.
+async fn file_paths(table: &DeltaTable, version: Option<u64>) -> Result<HashSet<Path>> {
+    let t = match version {
+        Some(v) => load(table, v).await?,
+        None => table.clone(),
+    };
+    Ok(t.snapshot()?
+        .log_data()
+        .iter()
+        .map(|f| f.object_store_path())
+        .collect())
+}
+
+/// Paths of the data files that the commit files of `versions` add or remove: every file
+/// those versions ever referenced.
+async fn committed_paths(
+    store: &dyn ObjectStore,
+    versions: impl Iterator<Item = u64>,
+) -> Result<HashSet<Path>> {
+    let mut out = HashSet::new();
+    for v in versions {
+        let path = Path::from(format!("_delta_log/{v:020}.json"));
+        let body = match store.get(&path).await {
+            Ok(r) => r.bytes().await?,
+            // Removed by a concurrent cleanup: its files are that cleanup's to delete.
+            Err(e) if not_found(&e) => continue,
+            Err(e) => return Err(e.into()),
+        };
+        for line in body.split(|b| *b == b'\n').filter(|l| !l.is_empty()) {
+            let action: serde_json::Value = serde_json::from_slice(line)
+                .map_err(|e| Error::Corruption(format!("{path}: {e}")))?;
+            for kind in ["add", "remove"] {
+                let Some(p) = action
+                    .get(kind)
+                    .and_then(|a| a.get("path"))
+                    .and_then(serde_json::Value::as_str)
+                else {
+                    continue;
+                };
+                // Absolute paths point outside the table; kv0 never writes them.
+                if p.contains("://") {
+                    continue;
+                }
+                if let Ok(p) = Path::from_url_path(p) {
+                    out.insert(p);
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Deletes `paths` (missing ones are fine). Returns the bytes removed, as far as `sizes` knows
+/// them.
+async fn delete_all(
+    store: &dyn ObjectStore,
+    paths: &HashSet<Path>,
+    sizes: &HashMap<Path, u64>,
+) -> Result<u64> {
+    let mut bytes = 0;
+    for path in paths {
+        match store.delete(path).await {
+            Ok(()) => bytes += sizes.get(path).copied().unwrap_or(0),
+            Err(e) if not_found(&e) => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(bytes)
+}
+
+/// Removes versions committed before `c.before` and the data files only they use. The latest
 /// version and tagged versions stay loadable. Returns (versions, bytes) removed.
-pub(crate) async fn cleanup(table: &DeltaTable, before: DateTime<Utc>) -> Result<(u64, u64)> {
+///
+/// - Data files: delta-rs's vacuum, run as a dry run (so it commits nothing) in two modes: Lite
+///   for files removed before `c.before`, Full for files no version references (a crashed
+///   writer's uncommitted files) once they are older than `c.orphan_grace`. Both keep the files
+///   of tagged versions. With `c.erase`, also every file the removed versions' commits added or
+///   removed, however recent: those are known to be committed, so no writer is about to use
+///   them.
+/// - Log: the commit, checkpoint and checksum files below the oldest version kept, after
+///   writing a checkpoint there and at every tagged version below it. A tagged version keeps
+///   its checkpoint, from which it loads on its own.
+///
+/// Tags are listed before anything is deleted and again before the log is, so a tag created
+/// meanwhile protects its version (its checkpoint is written by the tagging itself). A version
+/// tagged after its data files were deleted fails the tag's own check only if its log is gone
+/// too; that window is the time between the two listings.
+pub(crate) async fn cleanup(table: &DeltaTable, c: Cleanup) -> Result<(u64, u64)> {
     let mut latest = DeltaTable::new(table.log_store());
     latest.load().await?;
+    let latest_version = latest.version().unwrap_or(0);
     let store = latest.object_store();
-    // Listed right before deleting anything, so a tag created meanwhile protects its version.
     let tagged: Vec<u64> = tags(&latest).await?.into_iter().map(|t| t.1).collect();
-    let tagged_set: HashSet<u64> = tagged.iter().copied().collect();
     let now = Utc::now();
-    let age = (now - before).max(chrono::Duration::zero());
+    let age = (now - c.before).max(chrono::Duration::zero());
+    let grace = chrono::Duration::from_std(c.orphan_grace)
+        .map_err(|e| Error::InvalidArgument(format!("orphan_grace: {e}")))?;
 
-    // Data files: those removed before `before` (and not used by a tagged version), then
-    // files no version references that are older than the in-flight grace period.
-    let mut doomed: HashSet<String> = HashSet::new();
-    for (mode, retention) in [
-        (VacuumMode::Lite, age),
-        (VacuumMode::Full, age.max(INFLIGHT_GRACE)),
-    ] {
+    let mut doomed: HashSet<Path> = HashSet::new();
+    for (mode, retention) in [(VacuumMode::Lite, age), (VacuumMode::Full, age.max(grace))] {
         let (_, m) = latest
             .clone()
             .vacuum()
@@ -358,49 +435,70 @@ pub(crate) async fn cleanup(table: &DeltaTable, before: DateTime<Utc>) -> Result
             .with_keep_versions(&tagged)
             .with_dry_run(true)
             .await?;
-        doomed.extend(m.files_deleted);
+        doomed.extend(m.files_deleted.iter().map(|f| Path::from(f.as_str())));
+    }
+    let files = log_files(store.as_ref()).await?;
+    if c.erase {
+        // Only commits up to the version loaded: a newer one may add files that are live.
+        let mut gone = committed_paths(
+            store.as_ref(),
+            files
+                .commits
+                .keys()
+                .copied()
+                .filter(|v| *v <= latest_version),
+        )
+        .await?;
+        for p in file_paths(&latest, None).await? {
+            gone.remove(&p);
+        }
+        for &v in &tagged {
+            for p in file_paths(&latest, Some(v)).await? {
+                gone.remove(&p);
+            }
+        }
+        doomed.extend(gone);
     }
     let mut bytes = 0u64;
     if !doomed.is_empty() {
-        let sizes: HashMap<String, u64> = store
+        let sizes: HashMap<Path, u64> = store
             .list_with_delimiter(None)
             .await?
             .objects
             .into_iter()
-            .map(|m| (m.location.to_string(), m.size))
+            .map(|m| (m.location, m.size))
             .collect();
-        for f in &doomed {
-            let path = Path::from(f.as_str());
-            match store.delete(&path).await {
-                Ok(()) => bytes += sizes.get(path.as_ref()).copied().unwrap_or(0),
-                Err(e) if not_found(&e) => {}
-                Err(e) => return Err(e.into()),
-            }
-        }
+        bytes = delete_all(store.as_ref(), &doomed, &sizes).await?;
     }
 
-    // Commit files: everything before the oldest version committed at or after `before`
-    // (the latest at most), once a checkpoint there makes them unnecessary. Tagged versions
-    // keep their checkpoint.
-    let files = log_files(store.as_ref()).await?;
+    // Commit files: everything before the oldest version committed at or after `c.before`
+    // (the latest at most), once a checkpoint there makes them unnecessary.
     let Some(&newest) = files.commits.keys().next_back() else {
         return Ok((0, bytes));
     };
     let keep_from = files
         .commits
         .iter()
-        .find(|(_, t)| **t >= before)
+        .find(|(_, t)| **t >= c.before)
         .map_or(newest, |(v, _)| *v);
     if !files.all.iter().any(|(v, _)| *v < keep_from) {
         return Ok((0, bytes));
     }
+    // Listed again right before the log goes: a tag created since the first listing keeps
+    // its checkpoint too.
+    let tagged_set: HashSet<u64> = tags(&latest)
+        .await?
+        .into_iter()
+        .map(|t| t.1)
+        .chain(tagged.iter().copied())
+        .collect();
     ensure_checkpoint(
         &latest,
         keep_from,
         files.checkpoints.contains_key(&keep_from),
     )
     .await?;
-    for &t in &tagged {
+    for &t in &tagged_set {
         if t < keep_from {
             ensure_checkpoint(&latest, t, files.checkpoints.contains_key(&t)).await?;
         }
@@ -410,17 +508,13 @@ pub(crate) async fn cleanup(table: &DeltaTable, before: DateTime<Utc>) -> Result
         if *v >= keep_from {
             continue;
         }
-        let name = path.filename().unwrap_or_default();
-        let tag_checkpoint = tagged_set.contains(v)
-            && matches!(parse_log_name(name), Some((_, LogEntry::Checkpoint)));
-        if tag_checkpoint {
+        let kind = parse_log_name(path.filename().unwrap_or_default()).map(|k| k.1);
+        if tagged_set.contains(v) && matches!(kind, Some(LogEntry::Checkpoint)) {
             continue;
         }
         match store.delete(path).await {
             Ok(()) => {
-                if matches!(parse_log_name(name), Some((_, LogEntry::Commit)))
-                    && !tagged_set.contains(v)
-                {
+                if matches!(kind, Some(LogEntry::Commit)) && !tagged_set.contains(v) {
                     versions += 1;
                 }
             }

@@ -18,7 +18,8 @@ a periodic task off.
 | `lazy_value_threshold` | 4096 | Values longer than this many bytes leave memory once committed and are read from storage when needed; `0` keeps every value in memory |
 | `value_cache_size` | 64 MiB | Bytes of values read from storage cached per handle |
 | `snapshot_min_entries` | 100 000 | On close, save a snapshot of the view next to the WAL when it holds at least this many entries, so the next open reads only newer data; `None` disables |
-| `version_retention` | 7 days | On creation, enable automatic deletion of versions older than this many seconds; `None` keeps all |
+| `version_retention` | 7 days | Automatic deletion of versions older than this many seconds; `None` keeps all |
+| `orphan_grace` | 1 h | Seconds before cleanup and purge delete a data file no version references (a crashed writer's uncommitted file) |
 | `wal` | `True` | Log every write to a local write-ahead log before acknowledging it |
 | `wal_sync` | `"batch"` | `"none"` (never fsync), `"batch"` (fsync about every 100 ms) or `"always"` (fsync per write) |
 | `wal_dir` | cache dir | WAL root; else `KV0_WAL_DIR`, else `~/.cache/kv0/wal` (macOS `~/Library/Caches/kv0/wal`) |
@@ -40,7 +41,8 @@ per write.
 | `flush_interval` | 5 | Seconds between background commits |
 | `wal`, `wal_sync`, `wal_dir` | as above | The tracking writes' write-ahead log |
 | `replay_stale_wal` | `False` | As above |
-| `version_retention` | 7 days | On creation, automatic deletion of older versions |
+| `version_retention` | 7 days | Automatic deletion of older versions |
+| `orphan_grace` | 1 h | As above |
 | `max_fragments` | 32 | Rust: compact a table in the background after a flush above this many small files |
 | `compaction_target_rows` | 1 000 000 | Rust: files of at least this many rows are settled and never recompacted |
 | `mark_prune_interval` | 1 h | Rust: how often background maintenance prunes WAL mark rows |

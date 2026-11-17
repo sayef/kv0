@@ -54,6 +54,27 @@ use crate::storage::{self, StorageOptions};
 
 pub use json::canonical as canonical_context;
 
+/// Attempts of an `optimize` step that conflicts with another rewrite of the same files.
+const REPLAN_ATTEMPTS: u32 = 8;
+
+/// Evaluates `$step` (which plans on the latest version and commits) again, after a jittered
+/// backoff, while it fails with [`Error::Conflict`], up to [`REPLAN_ATTEMPTS`] times.
+macro_rules! replan {
+    ($what:expr, $step:expr) => {{
+        let mut attempt = 0u32;
+        loop {
+            match $step {
+                Err(Error::Conflict(m)) if attempt + 1 < REPLAN_ATTEMPTS => {
+                    attempt += 1;
+                    tracing::debug!(step = $what, attempt, error = %m, "kv0: optimize conflicted; planning it again");
+                    tokio::time::sleep(storage::backoff(attempt, 100, 5_000)).await;
+                }
+                r => break r,
+            }
+        }
+    }};
+}
+
 /// Options for [`Repo::open`].
 #[derive(Clone, Debug)]
 pub struct RepoOptions {
@@ -87,9 +108,15 @@ pub struct RepoOptions {
     /// Replay a WAL older than `mark_ttl` whose writer has no marks left (its writes may be
     /// stored twice). Default `false`: such a WAL fails the open.
     pub replay_stale_wal: bool,
-    /// When creating the tables, enable Lance's automatic cleanup of versions older than this.
-    /// `None` keeps every version. Default 7 days.
+    /// Delete versions older than this automatically. Lance tables take it when created (Lance
+    /// runs the cleanup every 20 commits); Delta Lake tables take it from each writing handle,
+    /// whose background maintenance runs the cleanup every 20 flushes. `None` keeps every
+    /// version. Default 7 days.
     pub version_retention: Option<Duration>,
+    /// Version cleanup and purge delete data files that no version references (left by a
+    /// writer that crashed before committing) only once they are older than this (see the
+    /// key-value layer's `orphan_grace`). Default 1 h.
+    pub orphan_grace: Duration,
     /// What to do when the repository still has the shared `records.lance` of builds before
     /// per-table records. Default [`LegacyRecords::Error`].
     pub legacy_records: LegacyRecords,
@@ -114,6 +141,7 @@ impl Default for RepoOptions {
             flush_rows: 50_000,
             flush_interval: Some(Duration::from_secs(5)),
             version_retention: Some(Duration::from_secs(7 * 24 * 3600)),
+            orphan_grace: Duration::from_secs(3600),
             wal: true,
             wal_sync: WalSync::Batch,
             wal_dir: None,
@@ -459,6 +487,10 @@ struct Core {
     me: std::sync::OnceLock<Weak<Core>>,
     /// Records tables opened so far, by name.
     records: tokio::sync::Mutex<HashMap<String, TableRef>>,
+    /// Commits this handle made (flushes and records appends), for the cleanup cadence.
+    commits: AtomicU64,
+    /// `commits` when background maintenance last cleaned up old versions.
+    cleaned_at: AtomicU64,
 }
 
 /// Owns the [`Core`]; flushes it when the last handle is dropped.
@@ -955,12 +987,22 @@ impl Core {
         if due {
             prune_marks(&mut t, o.mark_ttl).await?;
         }
+        // The records tables opened so far: clones, so appends keep going.
+        let mut extra: Vec<TableRef> = self.records.lock().await.values().cloned().collect();
+        if self.cleanup_due() {
+            self.cleaned_at
+                .store(self.commits.load(Ordering::Relaxed), Ordering::Relaxed);
+            self.cleanup_tables(
+                [&t.runs, &t.params, &t.series, &t.metrics]
+                    .into_iter()
+                    .chain(extra.iter()),
+            )
+            .await;
+        }
         if o.max_fragments == 0 {
             return Ok(0);
         }
         let mut compacted = 0;
-        // The records tables opened so far: clones, so appends keep going.
-        let mut extra: Vec<TableRef> = self.records.lock().await.values().cloned().collect();
         for t in [&mut t.runs, &mut t.params, &mut t.series, &mut t.metrics]
             .into_iter()
             .chain(extra.iter_mut())
@@ -972,6 +1014,37 @@ impl Core {
             }
         }
         Ok(compacted)
+    }
+
+    /// Whether [`crate::kv::CLEANUP_EVERY`] commits have passed since the last automatic
+    /// version cleanup, and one is configured.
+    fn cleanup_due(&self) -> bool {
+        self.opts.version_retention.is_some()
+            && self.commits.load(Ordering::Relaxed) - self.cleaned_at.load(Ordering::Relaxed)
+                >= crate::kv::CLEANUP_EVERY
+    }
+
+    /// Removes versions older than `version_retention` from the tables whose engine leaves
+    /// that to kv0. Failures are logged: the next cleanup tries again.
+    async fn cleanup_tables(&self, tables: impl Iterator<Item = &TableRef>) {
+        let Some(age) = self
+            .opts
+            .version_retention
+            .and_then(|r| chrono::Duration::from_std(r).ok())
+        else {
+            return;
+        };
+        let c = storage::Cleanup::before(chrono::Utc::now() - age, self.opts.orphan_grace);
+        for t in tables.filter(|t| t.needs_cleanup_cadence()) {
+            match t.cleanup(c).await {
+                Ok((versions, bytes)) => {
+                    tracing::debug!(uri = %self.uri, versions, bytes, "kv0: cleaned up old versions");
+                }
+                Err(e) => {
+                    tracing::debug!(uri = %self.uri, error = %e, "kv0: version cleanup failed");
+                }
+            }
+        }
     }
 
     /// Starts background maintenance unless one is already running.
@@ -1647,6 +1720,7 @@ impl Core {
         }
         drop(t);
         if r.is_ok() {
+            self.commits.fetch_add(1, Ordering::Relaxed);
             // After the WAL is truncated and without the tables lock: keep commits cheap and
             // mark rows few in the background.
             self.request_maintenance();
@@ -2056,6 +2130,10 @@ impl Core {
         let batch = records::batch(table, &rows, &seqs, now_micros())?;
         let v = records::append(&mut ds, batch).await?;
         self.keep_record_ds(table, ds).await;
+        self.commits.fetch_add(1, Ordering::Relaxed);
+        if self.cleanup_due() {
+            self.request_maintenance();
+        }
         Ok(v)
     }
 
@@ -2378,7 +2456,7 @@ impl Core {
             report.fragments_rewritten += ds.compact_removed().await?;
             // Every version but the latest and tagged ones.
             let (v, b) = ds
-                .cleanup(chrono::Utc::now() + chrono::Duration::seconds(1))
+                .cleanup(storage::Cleanup::erase(self.opts.orphan_grace))
                 .await?;
             report.versions_removed += v;
             report.bytes_removed += b;
@@ -2427,34 +2505,63 @@ impl Core {
         let t = &mut *t;
         prune_marks(t, self.opts.mark_ttl).await?;
         self.expire_tombstones(t).await?;
-        t.runs.latest().await?;
-        fold_runs(&mut t.runs).await?;
+        // Each rewrite below is planned on the latest version and planned again on a newer
+        // one when another rewrite (a background merge, a delete, another optimize) removed
+        // some of the same files first.
+        replan!(
+            "fold runs",
+            async {
+                t.runs.latest().await?;
+                fold_runs(&mut t.runs).await
+            }
+            .await
+        )?;
         for ds in [&mut t.runs, &mut t.params, &mut t.series] {
-            ds.latest().await?;
-            ds.merge_small(None).await?;
+            replan!(
+                "merge",
+                async {
+                    ds.latest().await?;
+                    ds.merge_small(None).await
+                }
+                .await
+            )?;
         }
-        // Points sorted by (series, step), the shape every read has, with overwritten steps
-        // dropped, points of deleted series dropped, and each series' statistics replaced by
-        // one exact delta; this rewrite also merges the small files. The series are read after
-        // the points' version: a series is always committed before its points.
-        t.metrics.latest().await?;
-        let dead = self.tombstones(&mut t.runs, true).await?;
-        t.series.latest().await?;
-        let live: HashSet<u64> = read_series_rows(&scan(&t.series, None).await?)?
-            .into_iter()
-            .filter(|s| !dead.contains(&s.run_id))
-            .map(|s| s.series_id)
-            .collect();
         // Records tables: drop superseded rows, then index item and run ids.
         for (name, mut ds) in self.all_record_ds().await? {
             let before = ds.version();
-            records::fold(&mut ds).await?;
+            replan!(
+                "fold records",
+                async {
+                    ds.latest().await?;
+                    records::fold(&mut ds).await
+                }
+                .await
+            )?;
             ds.index(&["item_id", "run_id"]).await?;
             if ds.version() != before {
                 self.keep_record_ds(&name, ds).await;
             }
         }
-        if !sort_metrics(&mut t.metrics, Arc::new(live)).await? {
+        // Points sorted by (series, step), the shape every read has, with overwritten steps
+        // dropped, points of deleted series dropped, and each series' statistics replaced by
+        // one exact delta; this rewrite also merges the small files. The series are read after
+        // the points' version: a series is always committed before its points.
+        let sorted = replan!(
+            "sort metrics",
+            async {
+                t.metrics.latest().await?;
+                let dead = self.tombstones(&mut t.runs, true).await?;
+                t.series.latest().await?;
+                let live: HashSet<u64> = read_series_rows(&scan(&t.series, None).await?)?
+                    .into_iter()
+                    .filter(|s| !dead.contains(&s.run_id))
+                    .map(|s| s.series_id)
+                    .collect();
+                sort_metrics(&mut t.metrics, Arc::new(live)).await
+            }
+            .await
+        )?;
+        if !sorted {
             return Ok(()); // nothing new: no rewrite, no index work
         }
         // Indexes only the new files when the index exists.
@@ -2602,6 +2709,8 @@ impl Repo {
             panic_next_maintenance: AtomicBool::new(false),
             me: std::sync::OnceLock::new(),
             records: tokio::sync::Mutex::new(HashMap::new()),
+            commits: AtomicU64::new(0),
+            cleaned_at: AtomicU64::new(0),
             deleted: parking_lot::Mutex::new(HashSet::new()),
             tombstones_read: parking_lot::Mutex::new(HashSet::new()),
             tombstones_checked: parking_lot::Mutex::new(None),
@@ -2995,7 +3104,10 @@ impl Repo {
             {
                 ds.latest().await?;
                 // Tagged versions are kept, and do not stop the cleanup of others.
-                removed += ds.cleanup(cutoff).await?.1;
+                removed += ds
+                    .cleanup(storage::Cleanup::before(cutoff, core.opts.orphan_grace))
+                    .await?
+                    .1;
             }
             Ok(removed)
         })

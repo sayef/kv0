@@ -74,8 +74,10 @@ class Options:
     * ``snapshot_min_entries``: on close, save a snapshot of the view next to the WAL when it
       holds at least this many entries, so the next open reads only newer data; ``None``
       disables snapshots (default 100 000)
-    * ``version_retention``: when creating the database, delete versions older than this many
-      seconds automatically (default 7 days); ``None`` keeps every version
+    * ``version_retention``: delete versions older than this many seconds automatically (default 7
+      days); ``None`` keeps every version
+    * ``orphan_grace``: seconds before version cleanup and purge delete a data file that no
+      version references, such as a crashed writer's uncommitted file (default one hour)
     * ``wal``: log every write to a local write-ahead log before acknowledging it, so buffered
       writes survive a process crash (default ``True``)
     * ``wal_sync``: ``"none"`` (never fsync), ``"batch"`` (fsync about every 100 ms, default) or

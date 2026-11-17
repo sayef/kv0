@@ -144,17 +144,14 @@ fn trk_child() {
             }
         }
         "optimize" => {
-            let mut done = 0;
-            for _ in 0..arg.parse::<u32>().unwrap() {
+            // Optimize plans each rewrite again when another rewrite (a delete, a background
+            // merge, the other optimizer) took some of the same files first: it never fails.
+            for round in 0..arg.parse::<u32>().unwrap() {
                 let r = repo.clone();
-                match block_on(async move { r.optimize().await }) {
-                    Ok(()) => done += 1,
-                    // Another rewrite took some of the same files first.
-                    Err(kv0::Error::Conflict(m)) => eprintln!("optimize conflicted: {m}"),
-                    Err(e) => panic!("optimize: {e}"),
+                if let Err(e) = block_on(async move { r.optimize().await }) {
+                    panic!("optimize round {round}: {e}");
                 }
             }
-            eprintln!("{done} optimize rounds committed");
         }
         other => panic!("unknown mode {other}"),
     }
@@ -304,7 +301,8 @@ fn deletes_and_optimize_racing_writers(
     block_on(async move { r.close().await }).unwrap();
     let (mut children, live) = writers(procs, runs);
     children.push(("delete", "deleter".into(), gone.join(",")));
-    children.push(("optimize", "optimizer".into(), "6".into()));
+    children.push(("optimize", "optimizer-a".into(), "6".into()));
+    children.push(("optimize", "optimizer-b".into(), "6".into()));
     run_children(uri, storage, &wal, &children);
     // A last optimize, so the sorted rewrite also drops whatever the racing one kept.
     let repo = open(uri, &wal.join("final"), storage);
