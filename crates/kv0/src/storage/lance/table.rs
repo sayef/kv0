@@ -1,5 +1,9 @@
 //! Tracking and records tables as Lance datasets.
 //!
+//! A file is a fragment, named by its fragment id. Datasets store kv0's integer columns
+//! unsigned; batches and filters are converted to and from the logical signed types at this
+//! boundary (see [`crate::storage::types`]).
+//!
 //! A file is a fragment, named by its fragment id. Removing rows writes Lance deletion files;
 //! [`Table::compact_removed`] rewrites the fragments that have them. File tags are kept in the
 //! dataset metadata under `<key>_fragments`, as ranges of fragment ids (`a-b,c-d`).
@@ -27,6 +31,7 @@ use crate::error::{Error, Result};
 use crate::storage::oplog::FileId;
 use crate::storage::pred::Pred;
 use crate::storage::table::{BatchStream, FileTag, Scan, Table, TableFile, TableRef, Tagged};
+use crate::storage::types;
 use crate::storage::StorageOptions;
 
 /// Opens the table at `uri` (see [`crate::storage::table::open`]).
@@ -58,6 +63,15 @@ impl LanceTable {
         })
     }
 
+    /// The dataset's schema, as stored.
+    fn stored(&self) -> arrow_schema::Schema {
+        arrow_schema::Schema::from(self.ds.schema())
+    }
+
+    fn sql(&self, pred: &Pred) -> String {
+        types::stored_pred(pred, &self.stored()).to_sql()
+    }
+
     fn fragments(&self, ids: &[FileId]) -> Vec<Fragment> {
         let ids: HashSet<&FileId> = ids.iter().collect();
         self.ds
@@ -77,7 +91,7 @@ impl LanceTable {
             s.project(cols)?;
         }
         if let Some(f) = &scan.filter {
-            s.filter(&f.to_sql())?;
+            s.filter(&self.sql(f))?;
         }
         if scan.bounded {
             // Lance may otherwise buffer up to 2 GiB of I/O ahead, which a process keeps
@@ -96,7 +110,11 @@ impl LanceTable {
         schema: SchemaRef,
         source: BatchStream,
     ) -> Result<usize> {
-        let stream = source.map_err(|e| DataFusionError::External(Box::new(e)));
+        let stored = self.stored();
+        let schema = types::to_stored(&RecordBatch::new_empty(schema), &stored)?.schema();
+        let stream = source
+            .and_then(move |b| futures::future::ready(types::to_stored(&b, &stored)))
+            .map_err(|e| DataFusionError::External(Box::new(e)));
         let source: SendableRecordBatchStream =
             Box::pin(RecordBatchStreamAdapter::new(schema, stream));
         let params = super::write_params(&self.options, WriteMode::Append);
@@ -223,7 +241,12 @@ impl Table for LanceTable {
     fn scan(&self, scan: Scan) -> BoxFuture<'_, Result<Vec<RecordBatch>>> {
         async move {
             let s = self.scanner(&scan)?;
-            Ok(s.try_into_stream().await?.try_collect().await?)
+            let stored = self.stored();
+            let batches: Vec<RecordBatch> = s.try_into_stream().await?.try_collect().await?;
+            batches
+                .iter()
+                .map(|b| types::to_logical(b, &stored))
+                .collect()
         }
         .boxed()
     }
@@ -231,18 +254,24 @@ impl Table for LanceTable {
     fn scan_stream(&self, scan: Scan) -> BoxFuture<'_, Result<BatchStream>> {
         async move {
             let s = self.scanner(&scan)?;
+            let stored = self.stored();
             let st = s.try_into_stream().await?;
-            Ok(st.map_err(Error::from).boxed())
+            Ok(st.map(move |b| types::to_logical(&b?, &stored)).boxed())
         }
         .boxed()
     }
 
     fn count(&self, filter: Option<Pred>) -> BoxFuture<'_, Result<usize>> {
-        async move { Ok(self.ds.count_rows(filter.map(|p| p.to_sql())).await?) }.boxed()
+        async move { Ok(self.ds.count_rows(filter.map(|p| self.sql(&p))).await?) }.boxed()
     }
 
     fn append(&mut self, batches: Vec<RecordBatch>) -> BoxFuture<'_, Result<()>> {
         async move {
+            let stored = self.stored();
+            let batches = batches
+                .iter()
+                .map(|b| types::to_stored(b, &stored))
+                .collect::<Result<Vec<_>>>()?;
             let params = super::write_params(&self.options, WriteMode::Append);
             self.ds = InsertBuilder::new(Arc::new(self.ds.clone()))
                 .with_params(&params)
@@ -253,6 +282,7 @@ impl Table for LanceTable {
         .boxed()
     }
 
+    /// `added` is taken as stored: Lance tables gain the unsigned types they had from the start.
     fn add_columns(&mut self, added: SchemaRef) -> BoxFuture<'_, Result<()>> {
         async move {
             self.ds
@@ -265,7 +295,7 @@ impl Table for LanceTable {
 
     fn rewrite_where(&mut self, pred: Pred) -> BoxFuture<'_, Result<()>> {
         async move {
-            self.ds.delete(&pred.to_sql()).await?;
+            self.ds.delete(&self.sql(&pred)).await?;
             Ok(())
         }
         .boxed()
@@ -462,15 +492,80 @@ mod tests {
             Vec::<String>::new()
         );
         assert_eq!(
-            rows(&t, Pred::ge("seq", 2u64).and(Pred::lt("seq", 4u64))),
+            rows(&t, Pred::ge("seq", 2i64).and(Pred::lt("seq", 4i64))),
             ["__kv0_wal__/c", "xxkv0_wal__/b"]
         );
         assert_eq!(
-            rows(&t, Pred::eq("seq", 1u64).or(Pred::eq("seq", 5u64))),
+            rows(&t, Pred::eq("seq", 1i64).or(Pred::eq("seq", 5i64))),
             ["50%_off", "__kv0_wal__/a"]
         );
         assert_eq!(rows(&t, Pred::And(Vec::new())).len(), 5);
         assert_eq!(rows(&t, Pred::Or(Vec::new())).len(), 0);
+    }
+
+    #[test]
+    fn signed_filters_on_unsigned_columns_follow_signed_order() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("run_id", DataType::Utf8, false),
+            Field::new("seq", DataType::UInt64, false),
+        ]));
+        let vals = [i64::MIN, -5, -1, 0, 3, i64::MAX];
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(StringArray::from_iter_values(
+                    vals.iter().map(|v| v.to_string()),
+                )),
+                Arc::new(UInt64Array::from_iter_values(
+                    vals.iter().map(|v| *v as u64),
+                )),
+            ],
+        )
+        .unwrap();
+        let t = crate::rt::block_on(async move {
+            let mut t = open(
+                "memory://signed",
+                &StorageOptions::new(),
+                schema,
+                true,
+                None,
+            )
+            .await?;
+            t.append(vec![batch]).await?;
+            Ok::<_, Error>(t)
+        })
+        .unwrap();
+        let check = |p: Pred, want: &dyn Fn(i64) -> bool| {
+            let mut expect: Vec<String> = vals
+                .iter()
+                .filter(|v| want(**v))
+                .map(|v| v.to_string())
+                .collect();
+            expect.sort();
+            assert_eq!(rows(&t, p.clone()), expect, "{p:?}");
+        };
+        for v in [i64::MIN, -6, -5, -2, -1, 0, 1, 3, 4, i64::MAX] {
+            check(Pred::ge("seq", v), &|x| x >= v);
+            check(Pred::lt("seq", v), &|x| x < v);
+            check(Pred::le("seq", v), &|x| x <= v);
+            check(Pred::eq("seq", v), &|x| x == v);
+            check(Pred::ne("seq", v), &|x| x != v);
+        }
+        check(Pred::is_in("seq", [-1i64, 3]), &|x| x == -1 || x == 3);
+        // Scans return the logical type.
+        let batches = crate::rt::block_on({
+            let t = t.clone();
+            async move { t.scan(Scan::all()).await }
+        })
+        .unwrap();
+        assert_eq!(
+            batches[0]
+                .schema()
+                .field_with_name("seq")
+                .unwrap()
+                .data_type(),
+            &DataType::Int64
+        );
     }
 
     #[test]

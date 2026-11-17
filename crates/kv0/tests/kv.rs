@@ -244,7 +244,11 @@ fn write_buffer_triggers_flush_and_background_flush() {
     }
     assert!(db.version() > v0, "buffer-size flush");
     db.put(b"late", b"x").unwrap();
-    std::thread::sleep(Duration::from_millis(600));
+    // The background flush runs within a few intervals; a slow or busy machine gets longer.
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while db.stats().pending_ops != 0 && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
     assert_eq!(db.stats().pending_ops, 0, "background flush");
 }
 

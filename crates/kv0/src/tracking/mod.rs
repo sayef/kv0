@@ -30,8 +30,8 @@ use std::time::{Duration, Instant};
 
 use arrow_array::builder::{ListBuilder, StringBuilder};
 use arrow_array::{
-    Array, BooleanArray, Float64Array, Int64Array, RecordBatch, StringArray,
-    TimestampMicrosecondArray, UInt32Array, UInt64Array,
+    Array, BooleanArray, Float64Array, Int32Array, Int64Array, RecordBatch, StringArray,
+    TimestampMicrosecondArray,
 };
 use arrow_schema::SchemaRef;
 use bytes::Bytes;
@@ -49,6 +49,7 @@ use crate::rt;
 use crate::storage::oplog::FileId;
 use crate::storage::pred::{Cmp, Lit, Pred};
 use crate::storage::table::{self as tbl, FileTag, Scan, TableRef};
+use crate::storage::types::{seq_from_i64, seq_to_i64, series_from_i64, series_to_i64};
 use crate::storage::{self, StorageOptions};
 
 pub use json::canonical as canonical_context;
@@ -551,9 +552,11 @@ fn runs_batch(rows: &[(u64, RunInfo, u32)]) -> Result<RecordBatch> {
         .map(|(_, r, _)| r.target.as_ref().map(|t| t.to_string()))
         .collect();
     Ok(RecordBatch::try_new(
-        schema::RUNS.clone(),
+        schema::RUNS_LOGICAL.clone(),
         vec![
-            Arc::new(UInt64Array::from_iter_values(rows.iter().map(|r| r.0))),
+            Arc::new(Int64Array::from_iter_values(
+                rows.iter().map(|r| seq_to_i64(r.0)),
+            )),
             Arc::new(StringArray::from_iter_values(
                 rows.iter().map(|(_, r, _)| &r.run_id),
             )),
@@ -579,7 +582,9 @@ fn runs_batch(rows: &[(u64, RunInfo, u32)]) -> Result<RecordBatch> {
                 )
                 .with_timezone("UTC"),
             ),
-            Arc::new(UInt32Array::from_iter_values(rows.iter().map(|r| r.2))),
+            Arc::new(Int32Array::from_iter_values(
+                rows.iter().map(|r| r.2 as i32),
+            )),
             Arc::new(s(|r| r.kind.as_deref())),
             Arc::new(target),
         ],
@@ -589,7 +594,7 @@ fn runs_batch(rows: &[(u64, RunInfo, u32)]) -> Result<RecordBatch> {
 fn read_runs(batches: &[RecordBatch]) -> Result<Vec<(u64, RunInfo, u32)>> {
     let mut out = Vec::new();
     for b in batches {
-        let seq = col::<UInt64Array>(b, "seq")?;
+        let seq = col::<Int64Array>(b, "seq")?;
         let id = col::<StringArray>(b, "run_id")?;
         let name = col::<StringArray>(b, "name")?;
         let exp = col::<StringArray>(b, "experiment")?;
@@ -601,7 +606,7 @@ fn read_runs(batches: &[RecordBatch]) -> Result<Vec<(u64, RunInfo, u32)>> {
         let updated = col::<TimestampMicrosecondArray>(b, "updated_at")?;
         let ended = col::<TimestampMicrosecondArray>(b, "ended_at")?;
         // Columns added later; absent or null in older rows.
-        let mask = col::<UInt32Array>(b, "fields").ok();
+        let mask = col::<Int32Array>(b, "fields").ok();
         let kind = col::<StringArray>(b, "kind").ok();
         let target = col::<StringArray>(b, "target").ok();
         for i in 0..b.num_rows() {
@@ -611,7 +616,7 @@ fn read_runs(batches: &[RecordBatch]) -> Result<Vec<(u64, RunInfo, u32)>> {
                 .downcast_ref::<StringArray>()
                 .ok_or_else(|| Error::Corruption("tags are not strings".into()))?;
             out.push((
-                seq.value(i),
+                seq_from_i64(seq.value(i)),
                 RunInfo {
                     run_id: id.value(i).to_string(),
                     name: opt_str(name, i),
@@ -633,7 +638,7 @@ fn read_runs(batches: &[RecordBatch]) -> Result<Vec<(u64, RunInfo, u32)>> {
                     },
                 },
                 mask.filter(|m| !m.is_null(i))
-                    .map_or(fields::ALL, |m| m.value(i)),
+                    .map_or(fields::ALL, |m| m.value(i) as u32),
             ));
         }
     }
@@ -642,9 +647,11 @@ fn read_runs(batches: &[RecordBatch]) -> Result<Vec<(u64, RunInfo, u32)>> {
 
 fn params_batch(rows: &[(u64, String, String, Value)]) -> Result<RecordBatch> {
     Ok(RecordBatch::try_new(
-        schema::PARAMS.clone(),
+        schema::PARAMS_LOGICAL.clone(),
         vec![
-            Arc::new(UInt64Array::from_iter_values(rows.iter().map(|r| r.0))),
+            Arc::new(Int64Array::from_iter_values(
+                rows.iter().map(|r| seq_to_i64(r.0)),
+            )),
             Arc::new(StringArray::from_iter_values(rows.iter().map(|r| &r.1))),
             Arc::new(StringArray::from_iter_values(rows.iter().map(|r| &r.2))),
             Arc::new(StringArray::from_iter_values(
@@ -659,10 +666,10 @@ fn params_batch(rows: &[(u64, String, String, Value)]) -> Result<RecordBatch> {
 
 fn series_batch(rows: &[SeriesInfo]) -> Result<RecordBatch> {
     Ok(RecordBatch::try_new(
-        schema::SERIES.clone(),
+        schema::SERIES_LOGICAL.clone(),
         vec![
-            Arc::new(UInt64Array::from_iter_values(
-                rows.iter().map(|r| r.series_id),
+            Arc::new(Int64Array::from_iter_values(
+                rows.iter().map(|r| series_to_i64(r.series_id)),
             )),
             Arc::new(StringArray::from_iter_values(
                 rows.iter().map(|r| &r.run_id),
@@ -678,9 +685,11 @@ fn series_batch(rows: &[SeriesInfo]) -> Result<RecordBatch> {
 
 fn metrics_batch(b: &Buffers) -> Result<RecordBatch> {
     Ok(RecordBatch::try_new(
-        schema::METRICS.clone(),
+        schema::METRICS_LOGICAL.clone(),
         vec![
-            Arc::new(UInt64Array::from(b.series_ids.clone())),
+            Arc::new(Int64Array::from_iter_values(
+                b.series_ids.iter().map(|id| series_to_i64(*id)),
+            )),
             Arc::new(Int64Array::from(b.steps.clone())),
             Arc::new(Int64Array::from(b.epochs.clone())),
             Arc::new(ts_array(b.timestamps.clone())),
@@ -695,11 +704,11 @@ fn deltas_batch(deltas: &[(u64, stats::Delta)]) -> Result<RecordBatch> {
     let n = deltas.len();
     let enc: Vec<Vec<u8>> = deltas.iter().map(|(_, d)| d.encode()).collect();
     Ok(RecordBatch::try_new(
-        schema::METRICS.clone(),
+        schema::METRICS_LOGICAL.clone(),
         vec![
-            Arc::new(UInt64Array::from(vec![0u64; n])),
+            Arc::new(Int64Array::from(vec![0i64; n])),
             Arc::new(Int64Array::from_iter_values(
-                deltas.iter().map(|(id, _)| *id as i64),
+                deltas.iter().map(|(id, _)| series_to_i64(*id)),
             )),
             Arc::new(Int64Array::new_null(n)),
             Arc::new(ts_array(vec![0; n])),
@@ -711,33 +720,35 @@ fn deltas_batch(deltas: &[(u64, stats::Delta)]) -> Result<RecordBatch> {
 
 /// The filter that selects statistics rows.
 fn stats_rows() -> Pred {
-    Pred::eq("series_id", 0u64).and(Pred::NotNull("stats"))
+    Pred::eq("series_id", 0i64).and(Pred::NotNull("stats"))
 }
 
 /// The points of the series in `ids` and their statistics rows.
 fn series_rows(ids: &[u64]) -> Pred {
-    Pred::is_in("series_id", ids.iter().copied())
-        .or(stats_rows().and(Pred::is_in("step", ids.iter().map(|i| *i as i64))))
+    let ids = || ids.iter().map(|i| series_to_i64(*i));
+    // A statistics row holds its series id in `step`.
+    Pred::is_in("series_id", ids()).or(stats_rows().and(Pred::is_in("step", ids())))
 }
 
 /// Rows of `runs` matching `pred` other than tombstones.
 fn not_tombstone(pred: Pred) -> Pred {
-    pred.and(Pred::IsNull("fields").or(Pred::ne("fields", fields::DELETED)))
+    pred.and(Pred::IsNull("fields").or(Pred::ne("fields", fields::DELETED as i32)))
 }
 
 fn read_series_rows(batches: &[RecordBatch]) -> Result<Vec<SeriesInfo>> {
     let mut out = Vec::new();
     let mut seen = HashSet::new();
     for b in batches {
-        let id = col::<UInt64Array>(b, "series_id")?;
+        let id = col::<Int64Array>(b, "series_id")?;
         let run = col::<StringArray>(b, "run_id")?;
         let name = col::<StringArray>(b, "name")?;
         let ctx = col::<StringArray>(b, "context")?;
         let created = col::<TimestampMicrosecondArray>(b, "created_at")?;
         for i in 0..b.num_rows() {
-            if seen.insert(id.value(i)) {
+            let sid = series_from_i64(id.value(i));
+            if seen.insert(sid) {
                 out.push(SeriesInfo {
-                    series_id: id.value(i),
+                    series_id: sid,
                     run_id: run.value(i).to_string(),
                     name: name.value(i).to_string(),
                     context: serde_json::from_str(ctx.value(i))
@@ -860,8 +871,12 @@ async fn marks_of(t: &Tables, writer: &str) -> Result<[u64; 4]> {
     let max_seq = |batches: Vec<RecordBatch>| -> Result<u64> {
         let mut m = 0;
         for b in &batches {
-            let seq = col::<UInt64Array>(b, "seq")?;
-            m = seq.values().iter().copied().fold(m, u64::max);
+            let seq = col::<Int64Array>(b, "seq")?;
+            m = seq
+                .values()
+                .iter()
+                .map(|s| seq_from_i64(*s))
+                .fold(m, u64::max);
         }
         Ok(m)
     };
@@ -875,7 +890,7 @@ async fn marks_of(t: &Tables, writer: &str) -> Result<[u64; 4]> {
         }
     }
     let mut points = 0;
-    let filter = Pred::eq("series_id", 0u64).and(Pred::eq("epoch", writer_hash(writer)));
+    let filter = Pred::eq("series_id", 0i64).and(Pred::eq("epoch", writer_hash(writer)));
     for b in scan(&t.metrics, Some(filter)).await? {
         let step = col::<Int64Array>(&b, "step")?;
         for v in step.values() {
@@ -1111,7 +1126,7 @@ async fn sort_metrics(t: &mut TableRef, live: Arc<HashSet<u64>>) -> Result<bool>
     };
     // Would a new point overwrite a step of a sorted file? Then sort everything.
     let full = old.is_empty() || moved || {
-        let mut last: HashMap<u64, i64> = HashMap::new();
+        let mut last: HashMap<i64, i64> = HashMap::new();
         let scan = Scan::filter(stats_rows())
             .columns(&["step", "stats"])
             .files(ids(&old));
@@ -1120,16 +1135,17 @@ async fn sort_metrics(t: &mut TableRef, live: Arc<HashSet<u64>>) -> Result<bool>
             let enc = col::<arrow_array::BinaryArray>(&b, "stats")?;
             for i in 0..b.num_rows() {
                 let d = stats::Delta::decode(enc.value(i))?;
-                let e = last.entry(step.value(i) as u64).or_insert(i64::MIN);
+                // A statistics row holds its series id in `step`.
+                let e = last.entry(step.value(i)).or_insert(i64::MIN);
                 *e = (*e).max(d.s.last_step);
             }
         }
-        let scan = Scan::filter(Pred::ne("series_id", 0u64))
+        let scan = Scan::filter(Pred::ne("series_id", 0i64))
             .columns(&["series_id", "step"])
             .files(ids(&new));
         let mut overlap = false;
         for b in t.scan(scan).await? {
-            let id = col::<UInt64Array>(&b, "series_id")?;
+            let id = col::<Int64Array>(&b, "series_id")?;
             let step = col::<Int64Array>(&b, "step")?;
             for i in 0..b.num_rows() {
                 if last.get(&id.value(i)).is_some_and(|l| step.value(i) <= *l) {
@@ -1146,6 +1162,8 @@ async fn sort_metrics(t: &mut TableRef, live: Arc<HashSet<u64>>) -> Result<bool>
     };
     let removed = ids(&rewrite);
     let rows: usize = rewrite.iter().map(|f| f.rows).sum();
+    // Buckets of equal width over the stored (signed) series ids, in their order, so the
+    // sorted files cover disjoint ranges of them.
     let buckets = (rows / SORT_BUCKET_ROWS + 1) as u64;
     let width = u64::MAX / buckets;
     let src = Arc::new(t.clone());
@@ -1154,11 +1172,12 @@ async fn sort_metrics(t: &mut TableRef, live: Arc<HashSet<u64>>) -> Result<bool>
         .then(move |i| {
             let (src, live, files) = (src.clone(), live.clone(), files.clone());
             async move {
-                let lo = i * width;
+                let lo = (i64::MIN as i128 + (i * width) as i128) as i64;
                 let filter = if i + 1 == buckets {
                     Pred::ge("series_id", lo)
                 } else {
-                    Pred::ge("series_id", lo).and(Pred::lt("series_id", lo + width))
+                    let hi = (lo as i128 + width as i128) as i64;
+                    Pred::ge("series_id", lo).and(Pred::lt("series_id", hi))
                 };
                 // One bucket at a time is the memory bound; keep the read-ahead small too.
                 let scan = Scan::filter(filter).files(files.to_vec()).bounded();
@@ -1174,19 +1193,19 @@ async fn sort_metrics(t: &mut TableRef, live: Arc<HashSet<u64>>) -> Result<bool>
         key: SORTED_TAG,
         keep: keep.into_iter().map(|f| f.id).collect(),
     };
-    t.replace(removed, schema::METRICS.clone(), stream, Some(tag))
+    t.replace(removed, schema::METRICS_LOGICAL.clone(), stream, Some(tag))
         .await?;
     Ok(true)
 }
 
-/// Points of `batches` sorted by `(series_id, step)`, keeping the last in scan order of points
+/// Points of `batches` sorted by `(series_id, step)` (the stored, signed series id), keeping the last in scan order of points
 /// that share a step (the one reads return) and only series in `live`, as metrics batches of
 /// up to 64k rows; then one exact statistics delta per series, replacing the stored deltas.
 fn sorted_points(batches: Vec<RecordBatch>, live: &HashSet<u64>) -> Result<Vec<RecordBatch>> {
     let rows = batches.iter().map(RecordBatch::num_rows).sum();
-    let mut pts: Vec<(u64, i64, u64, Option<i64>, i64, f64)> = Vec::with_capacity(rows);
+    let mut pts: Vec<(i64, i64, u64, Option<i64>, i64, f64)> = Vec::with_capacity(rows);
     for b in &batches {
-        let id = col::<UInt64Array>(b, "series_id")?;
+        let id = col::<Int64Array>(b, "series_id")?;
         let step = col::<Int64Array>(b, "step")?;
         let epoch = col::<Int64Array>(b, "epoch")?;
         let ts = col::<TimestampMicrosecondArray>(b, "timestamp")?;
@@ -1195,7 +1214,9 @@ fn sorted_points(batches: Vec<RecordBatch>, live: &HashSet<u64>) -> Result<Vec<R
         for i in 0..b.num_rows() {
             let sid = id.value(i);
             // Statistics rows are recomputed below; points of deleted series are dropped.
-            if (sid == 0 && !stats.is_null(i)) || (sid != 0 && !live.contains(&sid)) {
+            if (sid == 0 && !stats.is_null(i))
+                || (sid != 0 && !live.contains(&series_from_i64(sid)))
+            {
                 continue;
             }
             let n = pts.len() as u64;
@@ -1224,12 +1245,13 @@ fn sorted_points(batches: Vec<RecordBatch>, live: &HashSet<u64>) -> Result<Vec<R
         }
         if p.0 != 0 {
             let one = stats::Delta::of_point(p.1, p.5, p.4);
+            let id = series_from_i64(p.0);
             match deltas.last_mut() {
-                Some((id, d)) if *id == p.0 => d.merge(&one),
-                _ => deltas.push((p.0, one)),
+                Some((last, d)) if *last == id => d.merge(&one),
+                _ => deltas.push((id, one)),
             }
         }
-        b.series_ids.push(p.0);
+        b.series_ids.push(series_from_i64(p.0));
         b.steps.push(p.1);
         b.epochs.push(p.3);
         b.timestamps.push(p.4);
@@ -1243,7 +1265,7 @@ fn sorted_points(batches: Vec<RecordBatch>, live: &HashSet<u64>) -> Result<Vec<R
         out.push(metrics_batch(&b)?);
     }
     drop(pts);
-    deltas.sort_unstable_by_key(|d| d.0);
+    deltas.sort_unstable_by_key(|d| series_to_i64(d.0));
     for chunk in deltas.chunks(64 * 1024) {
         out.push(deltas_batch(chunk)?);
     }
@@ -1259,10 +1281,11 @@ async fn exact_from_points(
     let mut out: HashMap<u64, SeriesStats> = HashMap::new();
     let list: Vec<u64> = ids.iter().copied().collect();
     for chunk in list.chunks(1000) {
-        let filter = Pred::is_in("series_id", chunk.iter().copied());
+        let filter = Pred::is_in("series_id", chunk.iter().map(|i| series_to_i64(*i)));
         let (mut i, mut st, mut v, mut ts) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         for b in scan(metrics, Some(filter)).await? {
-            i.extend_from_slice(col::<UInt64Array>(&b, "series_id")?.values());
+            let ids = col::<Int64Array>(&b, "series_id")?.values();
+            i.extend(ids.iter().map(|i| series_from_i64(*i)));
             st.extend_from_slice(col::<Int64Array>(&b, "step")?.values());
             ts.extend_from_slice(col::<TimestampMicrosecondArray>(&b, "timestamp")?.values());
             v.extend_from_slice(col::<Float64Array>(&b, "value")?.values());
@@ -1283,11 +1306,11 @@ async fn prune_marks(t: &mut Tables, ttl: Duration) -> Result<()> {
         let mut best: HashMap<String, (u64, usize)> = HashMap::new();
         for b in scan(ds, Some(like.clone())).await? {
             let id = col::<StringArray>(&b, "run_id")?;
-            let seq = col::<UInt64Array>(&b, "seq")?;
+            let seq = col::<Int64Array>(&b, "seq")?;
             for i in 0..b.num_rows() {
                 if id.value(i).starts_with(MARK_PREFIX) {
                     let e = best.entry(id.value(i).to_string()).or_insert((0, 0));
-                    e.0 = e.0.max(seq.value(i));
+                    e.0 = e.0.max(seq_from_i64(seq.value(i)));
                     e.1 += 1;
                 }
             }
@@ -1299,7 +1322,7 @@ async fn prune_marks(t: &mut Tables, ttl: Duration) -> Result<()> {
                 if *max <= cutoff {
                     Pred::eq("run_id", id)
                 } else {
-                    Pred::eq("run_id", id).and(Pred::lt("seq", *max))
+                    Pred::eq("run_id", id).and(Pred::lt("seq", seq_to_i64(*max)))
                 }
             })
             .collect();
@@ -1338,7 +1361,7 @@ async fn prune_marks(t: &mut Tables, ttl: Duration) -> Result<()> {
     // metrics: series_id 0, the writer's hash in `epoch`, the sequence number in `step`.
     t.metrics.latest().await?;
     let mut best: HashMap<i64, (i64, usize)> = HashMap::new();
-    for b in scan(&t.metrics, Some(Pred::eq("series_id", 0u64))).await? {
+    for b in scan(&t.metrics, Some(Pred::eq("series_id", 0i64))).await? {
         let epoch = col::<Int64Array>(&b, "epoch")?;
         let step = col::<Int64Array>(&b, "step")?;
         for i in 0..b.num_rows() {
@@ -1353,7 +1376,7 @@ async fn prune_marks(t: &mut Tables, ttl: Duration) -> Result<()> {
         .iter()
         .filter(|(_, (max, n))| *n > 1 || (*max as u64) <= cutoff)
         .map(|(h, (max, _))| {
-            let mark = Pred::eq("series_id", 0u64).and(Pred::eq("epoch", *h));
+            let mark = Pred::eq("series_id", 0i64).and(Pred::eq("epoch", *h));
             if (*max as u64) <= cutoff {
                 mark
             } else {
@@ -1627,7 +1650,7 @@ impl Core {
                 .collect()
         };
         if !new.is_empty() {
-            let scan = Scan::filter(Pred::eq("fields", fields::DELETED))
+            let scan = Scan::filter(Pred::eq("fields", fields::DELETED as i32))
                 .columns(&["run_id", "fields"])
                 .files(new.clone());
             let batches = runs.scan(scan).await?;
@@ -1675,7 +1698,7 @@ impl Core {
             t.series.latest().await?;
             let list: Vec<u64> = unknown.iter().copied().collect();
             for chunk in list.chunks(1000) {
-                let ids = Pred::is_in("series_id", chunk.iter().copied());
+                let ids = Pred::is_in("series_id", chunk.iter().map(|i| series_to_i64(*i)));
                 for s in read_series_rows(&scan(&t.series, Some(ids)).await?)? {
                     run_of.insert(s.series_id, s.run_id.clone());
                     self.known_series.lock().insert(s.series_id, s.run_id);
@@ -1779,11 +1802,11 @@ impl Core {
         let batches = scan(&t.params, Some(Pred::eq("run_id", run_id))).await?;
         let mut current: BTreeMap<String, (u64, Value)> = BTreeMap::new();
         for b in &batches {
-            let seq = col::<UInt64Array>(b, "seq")?;
+            let seq = col::<Int64Array>(b, "seq")?;
             let key = col::<StringArray>(b, "key")?;
             let value = col::<StringArray>(b, "value")?;
             for i in 0..b.num_rows() {
-                let s = seq.value(i);
+                let s = seq_from_i64(seq.value(i));
                 if current.get(key.value(i)).is_some_and(|(old, _)| *old >= s) {
                     continue;
                 }
@@ -1819,7 +1842,7 @@ impl Core {
         let batches = scan(&t.params, None).await?;
         let mut current: HashMap<String, BTreeMap<String, (u64, Value)>> = HashMap::new();
         for b in &batches {
-            let seq = col::<UInt64Array>(b, "seq")?;
+            let seq = col::<Int64Array>(b, "seq")?;
             let run = col::<StringArray>(b, "run_id")?;
             let key = col::<StringArray>(b, "key")?;
             let value = col::<StringArray>(b, "value")?;
@@ -1828,7 +1851,7 @@ impl Core {
                     continue;
                 }
                 let m = current.entry(run.value(i).to_string()).or_default();
-                let s = seq.value(i);
+                let s = seq_from_i64(seq.value(i));
                 if m.get(key.value(i)).is_some_and(|(old, _)| *old >= s) {
                     continue;
                 }
@@ -1881,7 +1904,10 @@ impl Core {
         for c in chunks {
             let filter = match c {
                 None => stats_rows(),
-                Some(list) => stats_rows().and(Pred::is_in("step", list.iter().map(|i| *i as i64))),
+                // A statistics row holds its series id in `step`.
+                Some(list) => {
+                    stats_rows().and(Pred::is_in("step", list.iter().map(|i| series_to_i64(*i))))
+                }
             };
             let batches = ds
                 .scan(Scan::filter(filter).columns(&["step", "stats"]))
@@ -1891,7 +1917,7 @@ impl Core {
                 let enc = col::<arrow_array::BinaryArray>(b, "stats")?;
                 for i in 0..b.num_rows() {
                     let d = stats::Delta::decode(enc.value(i))?;
-                    match merged.entry(step.value(i) as u64) {
+                    match merged.entry(series_from_i64(step.value(i))) {
                         std::collections::hash_map::Entry::Occupied(mut e) => e.get_mut().merge(&d),
                         std::collections::hash_map::Entry::Vacant(e) => {
                             e.insert(d);
@@ -2119,9 +2145,9 @@ impl Core {
             t.metrics.clone()
         };
         let mut filter = if series_ids.len() == 1 {
-            Pred::eq("series_id", series_ids[0])
+            Pred::eq("series_id", series_to_i64(series_ids[0]))
         } else {
-            Pred::is_in("series_id", series_ids.iter().copied())
+            Pred::is_in("series_id", series_ids.iter().map(|i| series_to_i64(*i)))
         };
         if let Some(s) = range.start {
             filter = filter.and(Pred::ge("step", s));
@@ -2144,9 +2170,9 @@ impl Core {
             let hits = ds
                 .scan(Scan::filter(f).columns(&["series_id", "step"]))
                 .await?;
-            let mut span: HashMap<u64, (i64, i64)> = HashMap::new();
+            let mut span: HashMap<i64, (i64, i64)> = HashMap::new();
             for b in &hits {
-                let id = col::<UInt64Array>(b, "series_id")?;
+                let id = col::<Int64Array>(b, "series_id")?;
                 let step = col::<Int64Array>(b, "step")?;
                 for i in 0..b.num_rows() {
                     let e = span
@@ -2177,13 +2203,13 @@ impl Core {
         let mut rows: HashMap<u64, Vec<Point>> = HashMap::new();
         let mut n = 0usize;
         for b in &batches {
-            let id = col::<UInt64Array>(b, "series_id")?;
+            let id = col::<Int64Array>(b, "series_id")?;
             let step = col::<Int64Array>(b, "step")?;
             let epoch = col::<Int64Array>(b, "epoch")?;
             let ts = col::<TimestampMicrosecondArray>(b, "timestamp")?;
             let value = col::<Float64Array>(b, "value")?;
             for i in 0..b.num_rows() {
-                rows.entry(id.value(i)).or_default().push((
+                rows.entry(series_from_i64(id.value(i))).or_default().push((
                     step.value(i),
                     n,
                     (!epoch.is_null(i)).then(|| epoch.value(i)),
@@ -2226,7 +2252,7 @@ impl Core {
         let mut recs = self.all_record_ds().await?;
         // Every run with a tombstone, read in full.
         let dead: Vec<String> =
-            read_runs(&scan(&t.runs, Some(Pred::eq("fields", fields::DELETED))).await?)?
+            read_runs(&scan(&t.runs, Some(Pred::eq("fields", fields::DELETED as i32))).await?)?
                 .into_iter()
                 .map(|r| r.1.run_id)
                 .collect::<HashSet<_>>()
@@ -2344,7 +2370,10 @@ impl Core {
         let old: Vec<String> = read_runs(
             &scan(
                 &t.runs,
-                Some(Pred::eq("fields", fields::DELETED).and(Pred::lt("seq", cutoff))),
+                Some(
+                    Pred::eq("fields", fields::DELETED as i32)
+                        .and(Pred::lt("seq", seq_to_i64(cutoff))),
+                ),
             )
             .await?,
         )?

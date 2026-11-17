@@ -1,0 +1,130 @@
+kv b"big" = b"\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07"
+kv b"big2" = b"\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t"
+kv b"key00" = b"overwritten"
+kv b"key01" = b"value1"
+kv b"key02" = b"value2"
+kv b"key04" = b"value4"
+kv b"key05" = b"value5"
+kv b"key06" = b"value6"
+kv b"key07" = b"value7"
+kv b"key08" = b"value8"
+kv b"key09" = b"value9"
+kv b"key15" = b"value15"
+kv b"key16" = b"value16"
+kv b"key17" = b"value17"
+kv b"key18" = b"value18"
+kv b"key19" = b"value19"
+kv b"key20" = b"value20"
+kv b"key21" = b"value21"
+kv b"key22" = b"value22"
+kv b"key23" = b"value23"
+kv b"key24" = b"value24"
+kv b"key25" = b"value25"
+kv b"key26" = b"value26"
+kv b"key27" = b"value27"
+kv b"key28" = b"value28"
+kv b"key29" = b"value29"
+kv b"key30" = b"value30"
+kv b"key31" = b"value31"
+kv b"key32" = b"value32"
+kv b"key33" = b"value33"
+kv b"key34" = b"value34"
+kv b"key35" = b"value35"
+kv b"key36" = b"value36"
+kv b"key37" = b"value37"
+kv b"key38" = b"value38"
+kv b"key39" = b"value39"
+kv tags [("first", 2)]
+kv@first b"big" = b"\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07\x07"
+kv@first b"key00" = b"value0"
+kv@first b"key01" = b"value1"
+kv@first b"key02" = b"value2"
+kv@first b"key04" = b"value4"
+kv@first b"key05" = b"value5"
+kv@first b"key06" = b"value6"
+kv@first b"key07" = b"value7"
+kv@first b"key08" = b"value8"
+kv@first b"key09" = b"value9"
+kv@first b"key15" = b"value15"
+kv@first b"key16" = b"value16"
+kv@first b"key17" = b"value17"
+kv@first b"key18" = b"value18"
+kv@first b"key19" = b"value19"
+kv@first b"key20" = b"value20"
+kv@first b"key21" = b"value21"
+kv@first b"key22" = b"value22"
+kv@first b"key23" = b"value23"
+kv@first b"key24" = b"value24"
+kv@first b"key25" = b"value25"
+kv@first b"key26" = b"value26"
+kv@first b"key27" = b"value27"
+kv@first b"key28" = b"value28"
+kv@first b"key29" = b"value29"
+kv@first b"key30" = b"value30"
+kv@first b"key31" = b"value31"
+kv@first b"key32" = b"value32"
+kv@first b"key33" = b"value33"
+kv@first b"key34" = b"value34"
+kv@first b"key35" = b"value35"
+kv@first b"key36" = b"value36"
+kv@first b"key37" = b"value37"
+kv@first b"key38" = b"value38"
+kv@first b"key39" = b"value39"
+run RunInfo { run_id: "run-b", name: Some("name 1"), experiment: None, description: None, tags: ["fixture"], status: Running, archived: false, created_at: 1700000000000001, updated_at: 1794872660993851, ended_at: None, kind: None, target: None }
+run RunInfo { run_id: "run-a", name: Some("name 0"), experiment: None, description: None, tags: ["fixture"], status: Running, archived: false, created_at: 1700000000000000, updated_at: 1794872660982139, ended_at: None, kind: None, target: None }
+params [("run-a", Object {"lr": Number(0.001), "opt": Object {"name": String("adam")}}), ("run-b", Object {"lr": Number(0.002), "opt": Object {"name": String("adam")}})]
+series SeriesInfo { series_id: 279399330349706287, run_id: "run-a", name: "acc", context: Object {"subset": String("val")}, created_at: 1794872660982804 }
+series SeriesInfo { series_id: 1246551440508420490, run_id: "run-b", name: "lr", context: Object {"subset": String("val")}, created_at: 1794872660994694 }
+series SeriesInfo { series_id: 2908587472158525287, run_id: "run-b", name: "acc", context: Object {"subset": String("train")}, created_at: 1794872660994320 }
+series SeriesInfo { series_id: 4044471435251786023, run_id: "run-b", name: "grad_norm", context: Object {"subset": String("val")}, created_at: 1794872660995049 }
+series SeriesInfo { series_id: 4781896402845121696, run_id: "run-a", name: "lr", context: Object {"subset": String("train")}, created_at: 1794872660983636 }
+series SeriesInfo { series_id: 5388349966598975563, run_id: "run-a", name: "acc", context: Object {"subset": String("train")}, created_at: 1794872660982773 }
+series SeriesInfo { series_id: 5762377467656628687, run_id: "run-b", name: "loss", context: Object {"subset": String("val")}, created_at: 1794872660994000 }
+series SeriesInfo { series_id: 6616018692686723761, run_id: "run-b", name: "acc", context: Object {"subset": String("val")}, created_at: 1794872660994344 }
+series SeriesInfo { series_id: 6723926929781271143, run_id: "run-a", name: "loss", context: Object {"subset": String("train")}, created_at: 1794872660982335 }
+series SeriesInfo { series_id: 8373690559964987454, run_id: "run-b", name: "loss", context: Object {"subset": String("train")}, created_at: 1794872660993972 }
+series SeriesInfo { series_id: 9486744843652399938, run_id: "run-a", name: "grad_norm", context: Object {"subset": String("train")}, created_at: 1794872660984056 }
+series SeriesInfo { series_id: 9583119060098992494, run_id: "run-a", name: "lr", context: Object {"subset": String("val")}, created_at: 1794872660983713 }
+series SeriesInfo { series_id: 10153450280411762085, run_id: "run-b", name: "lr", context: Object {"subset": String("train")}, created_at: 1794872660994671 }
+series SeriesInfo { series_id: 11023302938410708422, run_id: "run-a", name: "loss", context: Object {"subset": String("val")}, created_at: 1794872660982374 }
+series SeriesInfo { series_id: 16511848308110936226, run_id: "run-a", name: "grad_norm", context: Object {"subset": String("val")}, created_at: 1794872660984082 }
+series SeriesInfo { series_id: 17497542233829345664, run_id: "run-b", name: "grad_norm", context: Object {"subset": String("train")}, created_at: 1794872660995024 }
+points 279399330349706287 MetricData { steps: [3, 5, 7, 9, 11, 13, 15, 17, 19], values: [1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5, 9.5], epochs: [Some(0), Some(0), Some(0), Some(0), Some(1), Some(1), Some(1), Some(1), Some(1)], timestamps: [1700000000000003, 1700000000000005, 1700000000000007, 1700000000000009, 1700000000000011, 1700000000000013, 1700000000000015, 1700000000000017, 1700000000000019] }
+points 1246551440508420490 MetricData { steps: [3, 5, 7, 9, 11, 13, 15, 17, 19], values: [2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5, 9.5, 10.5], epochs: [Some(0), Some(0), Some(0), Some(0), Some(1), Some(1), Some(1), Some(1), Some(1)], timestamps: [1700000000000003, 1700000000000005, 1700000000000007, 1700000000000009, 1700000000000011, 1700000000000013, 1700000000000015, 1700000000000017, 1700000000000019] }
+points 2908587472158525287 MetricData { steps: [4, 6, 8, 10, 12, 14, 16, 18], values: [3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0], epochs: [Some(0), Some(0), Some(0), Some(1), Some(1), Some(1), Some(1), Some(1)], timestamps: [1700000000000004, 1700000000000006, 1700000000000008, 1700000000000010, 1700000000000012, 1700000000000014, 1700000000000016, 1700000000000018] }
+points 4044471435251786023 MetricData { steps: [3, 5, 7, 9, 11, 13, 15, 17, 19], values: [2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5, 9.5, 10.5], epochs: [Some(0), Some(0), Some(0), Some(0), Some(1), Some(1), Some(1), Some(1), Some(1)], timestamps: [1700000000000003, 1700000000000005, 1700000000000007, 1700000000000009, 1700000000000011, 1700000000000013, 1700000000000015, 1700000000000017, 1700000000000019] }
+points 4781896402845121696 MetricData { steps: [4, 6, 8, 10, 12, 14, 16, 18], values: [2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0], epochs: [Some(0), Some(0), Some(0), Some(1), Some(1), Some(1), Some(1), Some(1)], timestamps: [1700000000000004, 1700000000000006, 1700000000000008, 1700000000000010, 1700000000000012, 1700000000000014, 1700000000000016, 1700000000000018] }
+points 5388349966598975563 MetricData { steps: [4, 6, 8, 10, 12, 14, 16, 18], values: [2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0], epochs: [Some(0), Some(0), Some(0), Some(1), Some(1), Some(1), Some(1), Some(1)], timestamps: [1700000000000004, 1700000000000006, 1700000000000008, 1700000000000010, 1700000000000012, 1700000000000014, 1700000000000016, 1700000000000018] }
+points 5762377467656628687 MetricData { steps: [3, 5, 7, 9, 11, 13, 15, 17, 19], values: [2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5, 9.5, 10.5], epochs: [Some(0), Some(0), Some(0), Some(0), Some(1), Some(1), Some(1), Some(1), Some(1)], timestamps: [1700000000000003, 1700000000000005, 1700000000000007, 1700000000000009, 1700000000000011, 1700000000000013, 1700000000000015, 1700000000000017, 1700000000000019] }
+points 6616018692686723761 MetricData { steps: [3, 5, 7, 9, 11, 13, 15, 17, 19], values: [2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5, 9.5, 10.5], epochs: [Some(0), Some(0), Some(0), Some(0), Some(1), Some(1), Some(1), Some(1), Some(1)], timestamps: [1700000000000003, 1700000000000005, 1700000000000007, 1700000000000009, 1700000000000011, 1700000000000013, 1700000000000015, 1700000000000017, 1700000000000019] }
+points 6723926929781271143 MetricData { steps: [4, 6, 8, 10, 12, 14, 16, 18], values: [2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0], epochs: [Some(0), Some(0), Some(0), Some(1), Some(1), Some(1), Some(1), Some(1)], timestamps: [1700000000000004, 1700000000000006, 1700000000000008, 1700000000000010, 1700000000000012, 1700000000000014, 1700000000000016, 1700000000000018] }
+points 8373690559964987454 MetricData { steps: [4, 6, 8, 10, 12, 14, 16, 18], values: [3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0], epochs: [Some(0), Some(0), Some(0), Some(1), Some(1), Some(1), Some(1), Some(1)], timestamps: [1700000000000004, 1700000000000006, 1700000000000008, 1700000000000010, 1700000000000012, 1700000000000014, 1700000000000016, 1700000000000018] }
+points 9486744843652399938 MetricData { steps: [4, 6, 8, 10, 12, 14, 16, 18], values: [2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0], epochs: [Some(0), Some(0), Some(0), Some(1), Some(1), Some(1), Some(1), Some(1)], timestamps: [1700000000000004, 1700000000000006, 1700000000000008, 1700000000000010, 1700000000000012, 1700000000000014, 1700000000000016, 1700000000000018] }
+points 9583119060098992494 MetricData { steps: [3, 5, 7, 9, 11, 13, 15, 17, 19], values: [1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5, 9.5], epochs: [Some(0), Some(0), Some(0), Some(0), Some(1), Some(1), Some(1), Some(1), Some(1)], timestamps: [1700000000000003, 1700000000000005, 1700000000000007, 1700000000000009, 1700000000000011, 1700000000000013, 1700000000000015, 1700000000000017, 1700000000000019] }
+points 10153450280411762085 MetricData { steps: [4, 6, 8, 10, 12, 14, 16, 18], values: [3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0], epochs: [Some(0), Some(0), Some(0), Some(1), Some(1), Some(1), Some(1), Some(1)], timestamps: [1700000000000004, 1700000000000006, 1700000000000008, 1700000000000010, 1700000000000012, 1700000000000014, 1700000000000016, 1700000000000018] }
+points 11023302938410708422 MetricData { steps: [3, 5, 7, 9, 11, 13, 15, 17, 19], values: [1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5, 9.5], epochs: [Some(0), Some(0), Some(0), Some(0), Some(1), Some(1), Some(1), Some(1), Some(1)], timestamps: [1700000000000003, 1700000000000005, 1700000000000007, 1700000000000009, 1700000000000011, 1700000000000013, 1700000000000015, 1700000000000017, 1700000000000019] }
+points 16511848308110936226 MetricData { steps: [3, 5, 7, 9, 11, 13, 15, 17, 19], values: [1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5, 9.5], epochs: [Some(0), Some(0), Some(0), Some(0), Some(1), Some(1), Some(1), Some(1), Some(1)], timestamps: [1700000000000003, 1700000000000005, 1700000000000007, 1700000000000009, 1700000000000011, 1700000000000013, 1700000000000015, 1700000000000017, 1700000000000019] }
+points 17497542233829345664 MetricData { steps: [4, 6, 8, 10, 12, 14, 16, 18], values: [3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0], epochs: [Some(0), Some(0), Some(0), Some(1), Some(1), Some(1), Some(1), Some(1)], timestamps: [1700000000000004, 1700000000000006, 1700000000000008, 1700000000000010, 1700000000000012, 1700000000000014, 1700000000000016, 1700000000000018] }
+stats 279399330349706287 SeriesStats { count: 12, first_step: 1, last_step: 23, last: 11.5, min: Some(0.5), min_step: Some(1), max: Some(11.5), max_step: Some(23), non_finite: 0, last_timestamp: 1700000000000023 }
+stats 1246551440508420490 SeriesStats { count: 12, first_step: 1, last_step: 23, last: 12.5, min: Some(1.5), min_step: Some(1), max: Some(12.5), max_step: Some(23), non_finite: 0, last_timestamp: 1700000000000023 }
+stats 2908587472158525287 SeriesStats { count: 13, first_step: 0, last_step: 24, last: 13.0, min: Some(1.0), min_step: Some(0), max: Some(13.0), max_step: Some(24), non_finite: 0, last_timestamp: 1700000000000024 }
+stats 4044471435251786023 SeriesStats { count: 12, first_step: 1, last_step: 23, last: 12.5, min: Some(1.5), min_step: Some(1), max: Some(12.5), max_step: Some(23), non_finite: 0, last_timestamp: 1700000000000023 }
+stats 4781896402845121696 SeriesStats { count: 13, first_step: 0, last_step: 24, last: 12.0, min: Some(0.0), min_step: Some(0), max: Some(12.0), max_step: Some(24), non_finite: 0, last_timestamp: 1700000000000024 }
+stats 5388349966598975563 SeriesStats { count: 13, first_step: 0, last_step: 24, last: 12.0, min: Some(0.0), min_step: Some(0), max: Some(12.0), max_step: Some(24), non_finite: 0, last_timestamp: 1700000000000024 }
+stats 5762377467656628687 SeriesStats { count: 12, first_step: 1, last_step: 23, last: 12.5, min: Some(1.5), min_step: Some(1), max: Some(12.5), max_step: Some(23), non_finite: 0, last_timestamp: 1700000000000023 }
+stats 6616018692686723761 SeriesStats { count: 12, first_step: 1, last_step: 23, last: 12.5, min: Some(1.5), min_step: Some(1), max: Some(12.5), max_step: Some(23), non_finite: 0, last_timestamp: 1700000000000023 }
+stats 6723926929781271143 SeriesStats { count: 13, first_step: 0, last_step: 24, last: 12.0, min: Some(0.0), min_step: Some(0), max: Some(12.0), max_step: Some(24), non_finite: 0, last_timestamp: 1700000000000024 }
+stats 8373690559964987454 SeriesStats { count: 13, first_step: 0, last_step: 24, last: 13.0, min: Some(1.0), min_step: Some(0), max: Some(13.0), max_step: Some(24), non_finite: 0, last_timestamp: 1700000000000024 }
+stats 9486744843652399938 SeriesStats { count: 13, first_step: 0, last_step: 24, last: 12.0, min: Some(0.0), min_step: Some(0), max: Some(12.0), max_step: Some(24), non_finite: 0, last_timestamp: 1700000000000024 }
+stats 9583119060098992494 SeriesStats { count: 12, first_step: 1, last_step: 23, last: 11.5, min: Some(0.5), min_step: Some(1), max: Some(11.5), max_step: Some(23), non_finite: 0, last_timestamp: 1700000000000023 }
+stats 10153450280411762085 SeriesStats { count: 13, first_step: 0, last_step: 24, last: 13.0, min: Some(1.0), min_step: Some(0), max: Some(13.0), max_step: Some(24), non_finite: 0, last_timestamp: 1700000000000024 }
+stats 11023302938410708422 SeriesStats { count: 12, first_step: 1, last_step: 23, last: 11.5, min: Some(0.5), min_step: Some(1), max: Some(11.5), max_step: Some(23), non_finite: 0, last_timestamp: 1700000000000023 }
+stats 16511848308110936226 SeriesStats { count: 12, first_step: 1, last_step: 23, last: 11.5, min: Some(0.5), min_step: Some(1), max: Some(11.5), max_step: Some(23), non_finite: 0, last_timestamp: 1700000000000023 }
+stats 17497542233829345664 SeriesStats { count: 13, first_step: 0, last_step: 24, last: 13.0, min: Some(1.0), min_step: Some(0), max: Some(13.0), max_step: Some(24), non_finite: 0, last_timestamp: 1700000000000024 }
+record Record { table: "evals", item_id: "item0", run_id: Some("run-a"), data: Object {"score": Number(0), "label": String("l0")}, seq: 1794872661062192315, created_at: 1794872661062194 }
+record Record { table: "evals", item_id: "item1", run_id: Some("run-b"), data: Object {"score": Number(1), "label": String("l1")}, seq: 1794872661062193194, created_at: 1794872661062194 }
+record Record { table: "evals", item_id: "item2", run_id: Some("run-a"), data: Object {"score": Number(2), "label": String("l2")}, seq: 1794872661062193309, created_at: 1794872661062194 }
+record Record { table: "evals", item_id: "item3", run_id: Some("run-b"), data: Object {"score": Number(3), "label": String("l3")}, seq: 1794872661062193392, created_at: 1794872661062194 }
+record Record { table: "evals", item_id: "item4", run_id: Some("run-a"), data: Object {"score": Number(4), "label": String("l4")}, seq: 1794872661062193490, created_at: 1794872661062194 }
+record Record { table: "evals", item_id: "item5", run_id: Some("run-b"), data: Object {"score": Number(5), "label": String("l5")}, seq: 1794872661062193553, created_at: 1794872661062194 }
+record tags [("v1", 2)]

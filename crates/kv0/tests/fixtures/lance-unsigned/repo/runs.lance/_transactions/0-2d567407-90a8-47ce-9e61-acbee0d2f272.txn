@@ -1,0 +1,5 @@
+$2d567407-90a8-47ce-9e61-acbee0d2f272²˜seq ÿÿÿÿÿÿÿÿÿ*uint648run_id ÿÿÿÿÿÿÿÿÿ*string8name ÿÿÿÿÿÿÿÿÿ*string08%
+experiment ÿÿÿÿÿÿÿÿÿ*string08&description ÿÿÿÿÿÿÿÿÿ*string08tags ÿÿÿÿÿÿÿÿÿ*list8item *string08status ÿÿÿÿÿÿÿÿÿ*string8archived ÿÿÿÿÿÿÿÿÿ*bool8-
+created_at	 ÿÿÿÿÿÿÿÿÿ*timestamp:us:UTC8-
+updated_at
+ ÿÿÿÿÿÿÿÿÿ*timestamp:us:UTC8-ended_at ÿÿÿÿÿÿÿÿÿ*timestamp:us:UTC08!fields ÿÿÿÿÿÿÿÿÿ*uint3208kind ÿÿÿÿÿÿÿÿÿ*string08!target ÿÿÿÿÿÿÿÿÿ*string08

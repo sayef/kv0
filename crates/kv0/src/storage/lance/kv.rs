@@ -1,6 +1,7 @@
 //! The key-value operation log as a Lance dataset.
 //!
-//! The dataset is an operation log: `seq: u64, op: u8, key: binary, value: binary?`. A flush
+//! The dataset is an operation log: `seq: u64, op: u8, key: binary, value: binary?`, the stored
+//! form of kv0's logical log (`seq: i64, op: i8`, see [`crate::storage::types`]). A flush
 //! appends one fragment in one commit. Compaction replaces every fragment it read with the
 //! materialised view in a single `Update` commit, which Lance allows to commit concurrently with
 //! other writers' appends. A file is a fragment, named by its fragment id; a row address is
@@ -9,7 +10,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock};
 
-use arrow_array::{Array, BinaryArray, RecordBatch, UInt64Array, UInt8Array};
+use arrow_array::{Array, BinaryArray, Int64Array, Int8Array, RecordBatch, UInt64Array};
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use bytes::Bytes;
 use futures::future::BoxFuture;
@@ -25,6 +26,7 @@ use crate::error::{Error, Result};
 use crate::kv::view::{self, Op, SnapChunk};
 use crate::kv::VersionInfo;
 use crate::storage::oplog::{Columns, FileId, Log, LogFile, OpLog, RawRow, Sink, WriterMark};
+use crate::storage::types::{self, seq_from_i64, seq_to_i64};
 use crate::storage::StorageOptions;
 
 pub(crate) static SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
@@ -35,6 +37,23 @@ pub(crate) static SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
         Field::new("value", DataType::Binary, true),
     ]))
 });
+
+/// The log as kv0 reads and writes it.
+static LOGICAL: LazyLock<SchemaRef> = LazyLock::new(|| types::logical_schema(&SCHEMA));
+
+/// A logical batch of the log, as stored.
+fn stored_batch(
+    seq: Int64Array,
+    op: Int8Array,
+    key: BinaryArray,
+    value: BinaryArray,
+) -> Result<RecordBatch> {
+    let b = RecordBatch::try_new(
+        LOGICAL.clone(),
+        vec![Arc::new(seq), Arc::new(op), Arc::new(key), Arc::new(value)],
+    )?;
+    types::to_stored(&b, &SCHEMA)
+}
 
 /// Rows per record batch when writing.
 const WRITE_BATCH_ROWS: usize = 64 * 1024;
@@ -84,14 +103,11 @@ fn file_id(fragment: u64) -> FileId {
 fn to_batches(ops: &[Op]) -> Result<Vec<RecordBatch>> {
     ops.chunks(WRITE_BATCH_ROWS)
         .map(|chunk| {
-            let seq = UInt64Array::from_iter_values(chunk.iter().map(|o| o.seq));
-            let op = UInt8Array::from_iter_values(chunk.iter().map(|o| o.kind));
+            let seq = Int64Array::from_iter_values(chunk.iter().map(|o| seq_to_i64(o.seq)));
+            let op = Int8Array::from_iter_values(chunk.iter().map(|o| o.kind as i8));
             let key = BinaryArray::from_iter_values(chunk.iter().map(|o| &o.key[..]));
             let value: BinaryArray = chunk.iter().map(|o| o.value.as_deref()).collect();
-            Ok(RecordBatch::try_new(
-                SCHEMA.clone(),
-                vec![Arc::new(seq), Arc::new(op), Arc::new(key), Arc::new(value)],
-            )?)
+            stored_batch(seq, op, key, value)
         })
         .collect()
 }
@@ -128,8 +144,8 @@ async fn take_values(ds: &Dataset, addrs: &[u64]) -> Result<Vec<Bytes>> {
 
 /// Turns a snapshot chunk into a record batch, reading values kept in Lance from `src`.
 async fn resolve(src: &Dataset, mut chunk: SnapChunk) -> Result<RecordBatch> {
-    let seq = UInt64Array::from(std::mem::take(&mut chunk.seq));
-    let op = UInt8Array::from(std::mem::take(&mut chunk.op));
+    let seq = Int64Array::from_iter_values(chunk.seq.iter().map(|s| seq_to_i64(*s)));
+    let op = Int8Array::from_iter_values(chunk.op.iter().map(|o| *o as i8));
     let key = chunk.key.finish();
     let mut value = chunk.value.finish();
     if !chunk.stored.is_empty() {
@@ -146,10 +162,7 @@ async fn resolve(src: &Dataset, mut chunk: SnapChunk) -> Result<RecordBatch> {
             .map(|v| v.as_deref())
             .collect();
     }
-    Ok(RecordBatch::try_new(
-        SCHEMA.clone(),
-        vec![Arc::new(seq), Arc::new(op), Arc::new(key), Arc::new(value)],
-    )?)
+    stored_batch(seq, op, key, value)
 }
 
 /// Replaces the fragments `ds` holds with fragments written from `chunks` (a view snapshot), in
@@ -261,8 +274,9 @@ impl OpLog for LanceLog {
             scan.with_row_address();
             let mut stream = scan.try_into_stream().await?;
             while let Some(b) = stream.try_next().await? {
-                let seq = col::<UInt64Array>(&b, "seq")?;
-                let op = col::<UInt8Array>(&b, "op")?;
+                let b = types::to_logical(&b, &SCHEMA)?;
+                let seq = col::<Int64Array>(&b, "seq")?;
+                let op = col::<Int8Array>(&b, "op")?;
                 let key = col::<BinaryArray>(&b, "key")?;
                 let value = match columns {
                     Columns::All => Some(col::<BinaryArray>(&b, "value")?),
@@ -271,8 +285,8 @@ impl OpLog for LanceLog {
                 let addr = col::<UInt64Array>(&b, ROW_ADDR)?;
                 for i in 0..b.num_rows() {
                     sink(RawRow {
-                        seq: seq.value(i),
-                        op: op.value(i),
+                        seq: seq_from_i64(seq.value(i)),
+                        op: op.value(i) as u8,
                         key: key.value(i),
                         value: value.and_then(|v| (!v.is_null(i)).then(|| v.value(i))),
                         addr: addr.value(i),

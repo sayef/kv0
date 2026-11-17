@@ -10,6 +10,7 @@ use std::fmt::Write as _;
 pub(crate) enum Lit {
     Str(String),
     Int(i64),
+    /// An unsigned value, for engines that store unsigned columns (see `storage::types`).
     UInt(u64),
     /// Microseconds since the Unix epoch (UTC), compared with a timestamp column.
     TimestampMicros(i64),
@@ -39,15 +40,9 @@ impl From<i64> for Lit {
     }
 }
 
-impl From<u64> for Lit {
-    fn from(v: u64) -> Self {
-        Lit::UInt(v)
-    }
-}
-
-impl From<u32> for Lit {
-    fn from(v: u32) -> Self {
-        Lit::UInt(v.into())
+impl From<i32> for Lit {
+    fn from(v: i32) -> Self {
+        Lit::Int(v.into())
     }
 }
 
@@ -226,7 +221,7 @@ mod tests {
     fn sql_quotes_strings_and_groups_clauses() {
         let p = Pred::eq("run_id", "it's")
             .and(Pred::is_in("step", [1i64, -2]))
-            .and(Pred::IsNull("fields").or(Pred::ne("fields", 2u32)));
+            .and(Pred::IsNull("fields").or(Pred::ne("fields", 2i32)));
         assert_eq!(
             p.to_sql(),
             "(run_id = 'it''s') AND (step IN (1, -2)) AND ((fields IS NULL) OR (fields <> 2))"
@@ -239,6 +234,6 @@ mod tests {
             Pred::StartsWith("run_id", "a_b%".into()).to_sql(),
             r"run_id LIKE 'a\_b\%%'"
         );
-        assert_eq!(Pred::is_in("x", Vec::<u64>::new()).to_sql(), "false");
+        assert_eq!(Pred::is_in("x", Vec::<i64>::new()).to_sql(), "false");
     }
 }
