@@ -67,10 +67,6 @@ const LIMIT: Duration = Duration::from_secs(180);
 
 #[test]
 fn kv_concurrent_writers_on_s3() {
-    if std::env::var("KV0_TEST_BACKEND").as_deref() == Ok("moraine") {
-        eprintln!("skipped: the moraine engine holds no key-value databases yet");
-        return;
-    }
     let Some((prefix, so)) = storage() else {
         eprintln!("skipped: KV0_TEST_S3_ENDPOINT is not set");
         return;

@@ -25,7 +25,7 @@ pub enum Engine {
     Lance,
     /// Delta Lake tables (delta-rs).
     Delta,
-    /// moraine databases (tracking repositories only, so far).
+    /// moraine databases.
     Moraine,
 }
 
@@ -190,6 +190,14 @@ pub(crate) async fn detect_uri(uri: &str, options: &StorageOptions) -> Result<Fo
         Format::Database(Engine::Delta)
     } else if has("_versions") {
         Format::Database(Engine::Lance)
+    } else if has("ops")
+        && list(&super::join(uri, "ops"), options)
+            .await?
+            .iter()
+            .any(|n| n == "data")
+    {
+        // A moraine database: its one table `ops`, with the Delta log under `ops/data/`.
+        Format::Database(Engine::Moraine)
     } else if LANCE_TABLES.iter().any(|t| has(t)) {
         Format::Repository(Engine::Lance)
     } else if let Some(t) = DELTA_TABLES.iter().find(|t| has(t)) {
@@ -289,11 +297,6 @@ pub(crate) async fn choose(
         } else {
             "the moraine engine was chosen, but this build of kv0 does not have it (enable the `moraine` feature)".to_string()
         }));
-    }
-    if engine == Engine::Moraine && kind == Kind::Database {
-        return Err(Error::NotSupported(format!(
-            "{uri}: the moraine engine holds tracking repositories only so far, not key-value databases"
-        )));
     }
     Ok((engine, format))
 }
@@ -577,11 +580,9 @@ mod tests {
                     .1,
                 Format::Empty
             );
-            // moraine holds tracking repositories only, and a Lance location stays Lance.
-            let e = ch(&new, Kind::Database, Some(Engine::Moraine))
-                .await
-                .unwrap_err();
-            assert!(matches!(e, Error::NotSupported(_)), "{e}");
+            // A new location takes moraine when the build has it; a Lance location stays Lance.
+            let kv = ch(&new, Kind::Database, Some(Engine::Moraine)).await;
+            assert_eq!(kv.is_ok(), cfg!(feature = "moraine"), "{kv:?}");
             let e = ch(&repo, Kind::Repository, Some(Engine::Moraine))
                 .await
                 .unwrap_err();

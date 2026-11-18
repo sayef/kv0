@@ -1,4 +1,5 @@
-//! The concurrency and crash suite of the Delta Lake engine: several processes writing,
+//! The concurrency and crash suite of the Delta Lake and moraine engines (the one
+//! `KV0_TEST_BACKEND` names; Delta by default): several processes writing,
 //! compacting, deleting, optimizing, cleaning up and purging at once; object-store faults
 //! (errors, timeouts, lost responses, duplicated requests); crashes at every write of a flush;
 //! readers pinned to old and tagged versions; and the protocol guards.
@@ -12,7 +13,9 @@
 //! - `KV0_CHAOS_SEED`: the random seed (printed by every test; set it to reproduce a run);
 //! - `KV0_CHAOS_SCALE`: multiplies writers' work (default 1; the nightly job runs more);
 //! - `KV0_TEST_S3_ENDPOINT`: also runs the S3 variants (CI starts an S3-compatible server).
-#![cfg(feature = "delta")]
+//!
+//! The tests of Delta Lake's own log (checkpoints, protocol guards, log gaps) run on Delta only.
+#![cfg(any(feature = "delta", feature = "moraine"))]
 
 use std::collections::{BTreeMap, HashMap};
 use std::io::Write as _;
@@ -29,9 +32,31 @@ use serde_json::json;
 // ---------------------------------------------------------------------------------------------
 // Setup shared by parent and children
 
-fn delta() {
+/// The engine under test: moraine when `KV0_TEST_BACKEND` says so (or the build has no Delta
+/// engine), else Delta.
+fn engine() -> &'static str {
+    if std::env::var("KV0_TEST_BACKEND").as_deref() == Ok("moraine") || !cfg!(feature = "delta") {
+        "moraine"
+    } else {
+        "delta"
+    }
+}
+
+fn pick_engine() {
     // Every test of this binary sets the same value, so the races between them are harmless.
-    std::env::set_var("KV0_TEST_BACKEND", "delta");
+    std::env::set_var("KV0_TEST_BACKEND", engine());
+}
+
+/// Whether a test of Delta Lake's own log applies; says so when it does not.
+fn on_delta(test: &str) -> bool {
+    let yes = engine() == "delta";
+    if !yes {
+        eprintln!(
+            "{test}: a test of the Delta Lake log; skipped on {}",
+            engine()
+        );
+    }
+    yes
 }
 
 /// SplitMix64.
@@ -224,7 +249,7 @@ impl Spawner {
     fn spawn(&self, role: &str, id: &str, arg: &str, extra: &[(&str, String)]) -> Child {
         let mut c = Command::new(&self.exe);
         c.args(["--exact", "chaos_child", "--nocapture", "--test-threads=1"])
-            .env("KV0_TEST_BACKEND", "delta")
+            .env("KV0_TEST_BACKEND", engine())
             .env("KV0_CHAOS_ROLE", role)
             .env("KV0_CHAOS_URI", &self.uri)
             .env("KV0_CHAOS_DIR", &self.dir)
@@ -542,7 +567,7 @@ fn kv_check(db: &Db, m: &Model) {
 
 /// Writers, a compactor, a cleaner, a purger and a pinned reader at once.
 fn kv_race(uri: &str, storage: &HashMap<String, String>, writers: u32, batches: u32) {
-    delta();
+    pick_engine();
     let seed = seed("kv_race");
     let dir = tempfile::tempdir().unwrap();
     let sp = Spawner::new(uri, dir.path(), storage, seed);
@@ -587,6 +612,15 @@ fn kv_race(uri: &str, storage: &HashMap<String, String>, writers: u32, batches: 
         let root = Path::new(uri);
         for v in &m.dead {
             let token = v.split('.').nth(1).unwrap();
+            if engine() == "moraine" {
+                // See `uncommitted_copies`: only a losing commit's uploads may be left.
+                let left = uncommitted_copies(root, token.as_bytes());
+                assert!(
+                    left.iter().all(|(_, c)| !c),
+                    "{token} of {v} survived purge: {left:?}"
+                );
+                continue;
+            }
             assert!(
                 !stored_anywhere(root, token.as_bytes()),
                 "{token} of {v} survived purge"
@@ -619,7 +653,7 @@ fn kv_writers_compaction_cleanup_purge_and_readers_race_on_s3() {
 /// Writers under random object-store faults: every acknowledged operation is stored exactly
 /// once (a lost commit response is recognised by the writer's mark, not committed again).
 fn kv_faults(uri: &str, storage: &HashMap<String, String>, writers: u32, batches: u32) {
-    delta();
+    pick_engine();
     let seed = seed("kv_faults");
     let dir = tempfile::tempdir().unwrap();
     let sp = Spawner::new(uri, dir.path(), storage, seed);
@@ -665,7 +699,7 @@ fn kv_writers_survive_object_store_faults_on_s3() {
 /// open replays its write-ahead log, and every acknowledged write is stored exactly once.
 #[test]
 fn kv_crash_at_every_write_of_a_flush_then_replay() {
-    delta();
+    pick_engine();
     let seed = seed("kv_crash");
     for after in [false, true] {
         for nth in 1.. {
@@ -704,12 +738,16 @@ fn kv_crash_at_every_write_of_a_flush_then_replay() {
             )
             .unwrap();
             db.cleanup_old_versions(Duration::ZERO).unwrap();
-            let files = std::fs::read_dir(&uri)
-                .unwrap()
-                .flatten()
-                .filter(|e| e.path().extension().is_some_and(|x| x == "parquet"))
-                .count();
-            assert_eq!(files, db.stats().fragments, "{nth} {when}: no orphan left");
+            // moraine's vacuum collects an uncommitted file only after the table's grace
+            // period (at least ten minutes, on the store's clock), not `orphan_grace`.
+            if engine() == "delta" {
+                let files = std::fs::read_dir(&uri)
+                    .unwrap()
+                    .flatten()
+                    .filter(|e| e.path().extension().is_some_and(|x| x == "parquet"))
+                    .count();
+                assert_eq!(files, db.stats().fragments, "{nth} {when}: no orphan left");
+            }
             kv_check(&db, &m);
         }
     }
@@ -961,7 +999,7 @@ fn trk_check(repo: &Repo, live: &[String], gone: &[String], records: bool) {
 }
 
 fn trk_race(uri: &str, storage: &HashMap<String, String>, writers: u32, runs: u32) {
-    delta();
+    pick_engine();
     let seed = seed("trk_race");
     let dir = tempfile::tempdir().unwrap();
     let sp = Spawner::new(uri, dir.path(), storage, seed);
@@ -1019,6 +1057,17 @@ fn trk_race(uri: &str, storage: &HashMap<String, String>, writers: u32, runs: u3
     trk_check(&repo, &live, &victims, true);
     if kv0::storage::is_local(uri) {
         for v in &victims {
+            if engine() == "moraine" {
+                // moraine leaves the files a losing commit uploaded (a compaction or a delete
+                // that another rewrite beat) to its vacuum, a grace period later; kv0 cannot
+                // tell them from another writer's upload in flight. Every other copy is gone.
+                let left = uncommitted_copies(Path::new(uri), marker(v).as_bytes());
+                assert!(
+                    left.iter().all(|(_, committed)| !committed),
+                    "{v} survived purge: {left:?}"
+                );
+                continue;
+            }
             assert!(
                 !stored_anywhere(Path::new(uri), marker(v).as_bytes()),
                 "{v} survived purge"
@@ -1042,6 +1091,31 @@ fn trk_race(uri: &str, storage: &HashMap<String, String>, writers: u32, runs: u3
     close(&repo);
 }
 
+/// Files under `root` holding `needle`, each with whether a log entry of its table names it
+/// (moraine layout: `<table>/data/<file>`, the log in `<table>/data/_delta_log/`).
+fn uncommitted_copies(root: &Path, needle: &[u8]) -> Vec<(PathBuf, bool)> {
+    fn walk(d: &Path, needle: &[u8], out: &mut Vec<(PathBuf, bool)>) {
+        for e in std::fs::read_dir(d).into_iter().flatten().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                walk(&p, needle, out);
+            } else if kv0::testing::file_holds(&p, needle) {
+                let name = p.file_name().unwrap().to_string_lossy().into_owned();
+                let log = p.parent().unwrap().join("_delta_log");
+                let named = std::fs::read_dir(&log)
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                    .any(|e| std::fs::read_to_string(e.path()).is_ok_and(|s| s.contains(&name)));
+                out.push((p, named || !name.ends_with(".parquet")));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, needle, &mut out);
+    out
+}
+
 #[test]
 fn tracking_writers_deletes_optimize_cleanup_purge_and_readers_race() {
     let dir = tempfile::tempdir().unwrap();
@@ -1059,7 +1133,7 @@ fn tracking_writers_deletes_optimize_cleanup_purge_and_readers_race_on_s3() {
 }
 
 fn trk_faults(uri: &str, storage: &HashMap<String, String>, writers: u32, runs: u32) {
-    delta();
+    pick_engine();
     let seed = seed("trk_faults");
     let dir = tempfile::tempdir().unwrap();
     let sp = Spawner::new(uri, dir.path(), storage, seed);
@@ -1109,7 +1183,7 @@ fn tracking_writers_survive_object_store_faults_on_s3() {
 /// the crash left uncommitted.
 #[test]
 fn tracking_crash_at_every_write_of_a_flush_then_replay() {
-    delta();
+    pick_engine();
     let seed = seed("trk_crash");
     for after in [false, true] {
         for nth in 1.. {
@@ -1146,7 +1220,11 @@ fn tracking_crash_at_every_write_of_a_flush_then_replay() {
 /// every writer's runs are there.
 #[test]
 fn concurrent_creators_make_each_table_once() {
-    delta();
+    // moraine's own suite has this case, with moraine's layout (`tests/moraine.rs`).
+    if !on_delta("concurrent_creators_make_each_table_once") {
+        return;
+    }
+    pick_engine();
     let seed = seed("create_race");
     let dir = tempfile::tempdir().unwrap();
     let uri = dir.path().join("repo").to_string_lossy().into_owned();
@@ -1178,7 +1256,7 @@ fn concurrent_creators_make_each_table_once() {
 }
 
 fn local_db() -> (tempfile::TempDir, String, PathBuf) {
-    delta();
+    pick_engine();
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("db").to_string_lossy().into_owned();
     let wal = dir.path().join("wal");
@@ -1194,6 +1272,9 @@ fn commit_file(db: &str, v: u64) -> PathBuf {
 /// A version 1 that creates the table again (the #4982 race) fails the open.
 #[test]
 fn a_second_create_at_version_one_trips_the_open() {
+    if !on_delta("a_second_create_at_version_one_trips_the_open") {
+        return;
+    }
     let (_d, path, wal) = local_db();
     let db = Db::open(&path, kv_opts(&wal, &HashMap::new())).unwrap();
     db.close().unwrap();
@@ -1228,6 +1309,9 @@ fn edit_create(db: &str, edit: impl Fn(&mut serde_json::Value)) {
 
 #[test]
 fn tables_with_features_kv0_does_not_implement_are_refused() {
+    if !on_delta("tables_with_features_kv0_does_not_implement_are_refused") {
+        return;
+    }
     type Edit = Box<dyn Fn(&mut serde_json::Value)>;
     let cases: Vec<(&str, Edit)> = vec![
         (
@@ -1293,6 +1377,9 @@ fn tables_with_features_kv0_does_not_implement_are_refused() {
 /// checkpoint delta-rs writes itself (every 100 commits).
 #[test]
 fn log_gaps_below_tag_checkpoints_load_every_kept_version() {
+    if !on_delta("log_gaps_below_tag_checkpoints_load_every_kept_version") {
+        return;
+    }
     let (_d, path, wal) = local_db();
     let db = Db::open(&path, kv_opts(&wal, &HashMap::new())).unwrap();
     let mut tagged = Vec::new();
@@ -1397,6 +1484,9 @@ fn a_fixed_version_reader_fails_cleanly_after_cleanup() {
 /// configuration is process-wide.)
 #[test]
 fn a_failed_checkpoint_does_not_fail_its_commit() {
+    if !on_delta("a_failed_checkpoint_does_not_fail_its_commit") {
+        return;
+    }
     let (d, path, _) = local_db();
     let sp = Spawner::new(&path, d.path(), &HashMap::new(), seed("checkpoint"));
     wait_all(vec![(
@@ -1441,6 +1531,9 @@ fn kv_checkpoint(cx: &Ctx) {
 /// process-wide.)
 #[test]
 fn a_commit_recreated_below_a_new_checkpoint_is_committed_again() {
+    if !on_delta("a_commit_recreated_below_a_new_checkpoint_is_committed_again") {
+        return;
+    }
     let (d, path, _) = local_db();
     let sp = Spawner::new(&path, d.path(), &HashMap::new(), seed("below"));
     wait_all(vec![("below".into(), sp.spawn("kv-below", "b", "", &[]))]);
@@ -1544,7 +1637,7 @@ fn a_writer_behind_a_purge_commits_on_the_main_line() {
 /// The same for a tracking writer behind another handle's purge.
 #[test]
 fn a_tracking_writer_behind_a_purge_commits_on_the_main_line() {
-    delta();
+    pick_engine();
     let dir = tempfile::tempdir().unwrap();
     let uri = dir.path().join("repo").to_string_lossy().into_owned();
     let a = trk_open_at(&uri, trk_opts(&dir.path().join("wal/a"), &HashMap::new()));
@@ -1568,6 +1661,9 @@ fn a_tracking_writer_behind_a_purge_commits_on_the_main_line() {
 /// (a tag's checkpoint written after the cleanup's) leaves the table readable.
 #[test]
 fn an_old_last_checkpoint_hint_below_a_log_gap_still_loads() {
+    if !on_delta("an_old_last_checkpoint_hint_below_a_log_gap_still_loads") {
+        return;
+    }
     let (_d, path, wal) = local_db();
     let db = Db::open(&path, kv_opts(&wal, &HashMap::new())).unwrap();
     for i in 0..2 {

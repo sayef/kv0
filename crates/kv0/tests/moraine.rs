@@ -14,8 +14,8 @@
 //! - `KV0_CHAOS_SCALE`: multiplies writers' work (default 1);
 //! - `KV0_TEST_S3_ENDPOINT`: also runs the S3 variants against an S3-compatible server.
 //!
-//! Maintenance (`optimize`, version cleanup, purge) and tags are not part of the moraine engine
-//! yet, so the scenarios of the Delta suite that use them are not here.
+//! The scenarios with maintenance (`optimize`, version cleanup, purge), tags and key-value
+//! databases are the shared chaos suite's (`tests/chaos.rs` with `KV0_TEST_BACKEND=moraine`).
 #![cfg(feature = "moraine")]
 
 use std::collections::HashMap;
@@ -749,6 +749,79 @@ fn a_memory_repository_shares_one_store_across_its_tables() {
     assert!(tables.is_empty());
 }
 
+/// moraine keeps the latest version and pinned (tagged) ones readable, nothing else: reading an
+/// older version that no tag names fails with an error naming the way out, in both layers.
+#[test]
+fn only_the_latest_and_tagged_versions_are_readable() {
+    moraine();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("db").to_string_lossy().into_owned();
+    let o = kv0::kv::Options {
+        flush_interval: None,
+        wal_dir: Some(dir.path().join("wal-kv")),
+        ..kv0::kv::Options::default()
+    };
+    let db = kv0::kv::Db::open(&path, o.clone()).unwrap();
+    db.put(b"k", b"v1").unwrap();
+    db.flush().unwrap();
+    let v1 = db.version();
+    db.put(b"k", b"v2").unwrap();
+    db.flush().unwrap();
+    let at = |v: u64| {
+        kv0::kv::Db::open(
+            &path,
+            kv0::kv::Options {
+                version: Some(v),
+                ..o.clone()
+            },
+        )
+    };
+    let Err(e) = at(v1) else {
+        panic!("an untagged old version opened");
+    };
+    assert!(
+        matches!(&e, kv0::Error::NotFound(m) if m.contains("tag")),
+        "{e}"
+    );
+    db.create_tag("first", Some(v1)).unwrap();
+    assert_eq!(
+        at(v1).unwrap().get(b"k").unwrap().as_deref(),
+        Some(&b"v1"[..])
+    );
+    // The tag is a commit of its own (a table property), so the latest version moved on.
+    let versions: Vec<u64> = db.versions().unwrap().iter().map(|v| v.version).collect();
+    assert_eq!(versions.len(), 2, "{versions:?}");
+    assert_eq!(versions[0], v1);
+    db.close().unwrap();
+
+    let uri = dir.path().join("repo").to_string_lossy().into_owned();
+    let repo = trk_open_at(&uri, trk_opts(&dir.path().join("wal"), &HashMap::new()));
+    let r = repo.clone();
+    let rec = |v: i64| NewRecord {
+        item_id: "q".into(),
+        run_id: None,
+        data: json!({ "v": v }),
+    };
+    let e = block_on(async move {
+        let v = r.append_records("evals", vec![rec(1)]).await?;
+        r.append_records("evals", vec![rec(2)]).await?;
+        r.records(
+            "evals",
+            RecordQuery {
+                at: kv0::tracking::At::Version(v),
+                ..RecordQuery::default()
+            },
+        )
+        .await
+    })
+    .unwrap_err();
+    assert!(
+        matches!(&e, kv0::Error::NotFound(m) if m.contains("tag")),
+        "{e}"
+    );
+    close(&repo);
+}
+
 /// A quick timing sanity check of one tracking workload on Lance and on moraine, through the
 /// same API in one build (`cargo test --features moraine --test moraine -- --ignored
 /// --nocapture timing`). Not a benchmark: one repetition, local disk, whatever build profile
@@ -828,10 +901,80 @@ fn timing_sanity_check() {
             block_on(async move { r.records("evals", RecordQuery::default()).await }).unwrap();
         assert_eq!(all.len(), RECORDS);
         let rec_read = t.elapsed();
+        let t = Instant::now();
+        let r = repo.clone();
+        block_on(async move { r.optimize().await }).unwrap();
+        let optimize = t.elapsed();
+        let t = Instant::now();
+        for k in 0..RUNS {
+            let r = repo.clone();
+            let d = block_on(async move {
+                r.read_metric(
+                    &format!("run-{k:03}"),
+                    "loss",
+                    &json!({}),
+                    StepRange::default(),
+                )
+                .await
+            })
+            .unwrap();
+            assert_eq!(d.steps.len(), POINTS as usize);
+        }
+        let reads_after = t.elapsed();
         close(&repo);
         eprintln!(
             "{engine}: log {RUNS} runs x {POINTS} points {log:?}; read {RUNS} series {reads:?}; \
-             append {RECORDS} records in 20 commits {rec_write:?}; read them {rec_read:?}"
+             append {RECORDS} records in 20 commits {rec_write:?}; read them {rec_read:?}; \
+             optimize {optimize:?}; read {RUNS} series after {reads_after:?}"
+        );
+
+        // Key-value: puts with a flush every 5,000, then gets, a full scan, and a compaction.
+        const KEYS: usize = 50_000;
+        let path = dir.path().join("db").to_string_lossy().into_owned();
+        let o = kv0::kv::Options {
+            engine: Some(engine),
+            flush_interval: None,
+            max_fragments: 0,
+            version_retention: None,
+            wal_dir: Some(dir.path().join("wal-kv")),
+            ..kv0::kv::Options::default()
+        };
+        let db = kv0::kv::Db::open(&path, o.clone()).unwrap();
+        let key = |i: usize| format!("key-{:08}", (i * 7919) % KEYS);
+        let t = Instant::now();
+        for i in 0..KEYS {
+            db.put(
+                key(i).as_bytes(),
+                format!("value-{i}-{}", "v".repeat(40)).as_bytes(),
+            )
+            .unwrap();
+            if (i + 1) % 5_000 == 0 {
+                db.flush().unwrap();
+            }
+        }
+        let put = t.elapsed();
+        db.close().unwrap();
+        let t = Instant::now();
+        let db = kv0::kv::Db::open(&path, o.clone()).unwrap();
+        let open = t.elapsed();
+        let t = Instant::now();
+        for i in (0..KEYS).step_by(10) {
+            assert!(db.get(key(i).as_bytes()).unwrap().is_some());
+        }
+        let get = t.elapsed();
+        let t = Instant::now();
+        let mut it = db.iter();
+        it.seek_to_first();
+        assert_eq!(it.count(), KEYS);
+        let scan = t.elapsed();
+        let t = Instant::now();
+        db.compact().unwrap();
+        let compact = t.elapsed();
+        db.close().unwrap();
+        eprintln!(
+            "{engine}: kv put {KEYS} keys in 10 flushes {put:?}; open {open:?}; {} gets {get:?}; \
+             scan {scan:?}; compact {compact:?}",
+            KEYS / 10
         );
     }
 }

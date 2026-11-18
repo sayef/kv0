@@ -14,6 +14,7 @@
 //! - moraine table names are `[a-z0-9][a-z0-9_-]{0,63}`. A records table `records/<dir name>`
 //!   becomes `rec-<base32 of the dir name>` (shortened with a hash when long); its directory name
 //!   is kept in `_kv0/records/<table name>`, written before the table.
+//! - A key-value database is one moraine database with one table, `ops` (see [`kv`]).
 //! - Tags are moraine pins (see [`pins`]). moraine keeps no other old versions readable: a
 //!   handle reads the latest version, or a tagged one.
 //! - Maintenance is moraine's (compaction, checkpoints, log cleanup, vacuum on server time),
@@ -21,6 +22,7 @@
 //!   moraine's grace period (see [`erase`]).
 
 pub(crate) mod erase;
+pub(crate) mod kv;
 pub(crate) mod pins;
 pub(crate) mod read;
 pub(crate) mod table;

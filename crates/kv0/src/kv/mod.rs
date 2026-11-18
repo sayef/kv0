@@ -1584,9 +1584,17 @@ mod tests {
         .unwrap();
         db.put(b"a", &[1u8; 100]).unwrap();
         db.flush().unwrap();
-        // Lance keeps data files under `data/`, Delta next to `_delta_log/`.
+        // Lance keeps data files under `data/`, Delta next to `_delta_log/`, moraine under
+        // `ops/data/`.
         let lance = path.join("data");
-        let dir = if lance.is_dir() { lance } else { path.clone() };
+        let moraine = path.join("ops/data");
+        let dir = if moraine.is_dir() {
+            moraine
+        } else if lance.is_dir() {
+            lance
+        } else {
+            path.clone()
+        };
         for f in std::fs::read_dir(dir).unwrap() {
             let f = f.unwrap().path();
             if f.is_file() {

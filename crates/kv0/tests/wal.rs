@@ -40,9 +40,13 @@ fn wal_files(root: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// Rows a writer's mark takes in storage: Lance keeps it as a row, Delta as a `txn` action.
+/// Rows a writer's mark takes in storage: Lance keeps it as a row, Delta and moraine as a
+/// transaction id.
 fn mark_rows() -> usize {
-    usize::from(std::env::var("KV0_TEST_BACKEND").as_deref() != Ok("delta"))
+    usize::from(!matches!(
+        std::env::var("KV0_TEST_BACKEND").as_deref(),
+        Ok("delta" | "moraine")
+    ))
 }
 
 fn count(db: &Db) -> usize {
@@ -415,6 +419,15 @@ fn wal_marks_expire_and_a_stale_wal_needs_consent() {
     assert_eq!(db.stats().stored_rows, 21, "20 keys and orphan; no marks");
     db.close().unwrap();
 
+    if std::env::var("KV0_TEST_BACKEND").as_deref() == Ok("moraine") {
+        // moraine keeps a writer's mark (a caller transaction id) for good, so even a stale
+        // log is replayed exactly once, without consent.
+        let db = Db::open(&db_path, ttl.clone()).unwrap();
+        assert_eq!(db.get(b"orphan-2").unwrap().as_deref(), Some(&b"2"[..]));
+        db.compact().unwrap();
+        assert_eq!(db.stats().stored_rows, 22, "replayed once");
+        return;
+    }
     let err = Db::open(&db_path, ttl.clone()).unwrap_err();
     assert!(
         matches!(err, kv0::Error::InvalidArgument(ref m) if m.contains("replay_stale_wal")),

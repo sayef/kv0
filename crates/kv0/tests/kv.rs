@@ -112,8 +112,11 @@ fn persists_across_reopen_and_compaction() {
     db.compact().unwrap();
     let s = db.stats();
     assert_eq!(s.fragments, 1);
-    // Lance keeps the WAL mark as a row; Delta as a `txn` action.
-    let mark_rows = usize::from(std::env::var("KV0_TEST_BACKEND").as_deref() != Ok("delta"));
+    // Lance keeps the WAL mark as a row; Delta and moraine as a transaction id.
+    let mark_rows = usize::from(!matches!(
+        std::env::var("KV0_TEST_BACKEND").as_deref(),
+        Ok("delta" | "moraine")
+    ));
     assert_eq!(
         s.stored_rows,
         990 + 1 + mark_rows,
@@ -193,7 +196,21 @@ fn time_travel() {
     let v = db.version();
     db.put(b"k", b"new").unwrap();
     db.flush().unwrap();
-    assert!(db.versions().unwrap().len() >= 3);
+    if std::env::var("KV0_TEST_BACKEND").as_deref() == Ok("moraine") {
+        // moraine keeps the latest and tagged versions readable, nothing else.
+        assert!(Db::open(
+            &p,
+            Options {
+                version: Some(v),
+                ..opts()
+            },
+        )
+        .is_err());
+        db.create_tag("old", Some(v)).unwrap();
+        assert_eq!(db.versions().unwrap().len(), 2);
+    } else {
+        assert!(db.versions().unwrap().len() >= 3);
+    }
     let old = Db::open(
         &p,
         Options {
