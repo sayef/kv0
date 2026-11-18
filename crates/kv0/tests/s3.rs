@@ -132,12 +132,7 @@ fn tracking(prefix: String, so: HashMap<String, String>) {
         for i in 0..1000 {
             run.track("loss", i as f64, Track::default()).unwrap();
         }
-        // The moraine engine has no maintenance yet; a flush writes the points there.
-        if std::env::var("KV0_TEST_BACKEND").as_deref() == Ok("moraine") {
-            repo.flush().await.unwrap();
-        } else {
-            repo.optimize().await.unwrap();
-        }
+        repo.optimize().await.unwrap();
         let d = repo
             .read_metric(
                 &run.id(),

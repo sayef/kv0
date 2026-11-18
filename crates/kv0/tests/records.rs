@@ -27,14 +27,10 @@ fn records_keep_the_newest_row_per_key_and_tags_pin_one_table() {
         run_id: None,
         data: json!({ "v": v }),
     };
-    // The moraine engine has no tags or maintenance yet: only the newest-row part runs there.
-    let tags = std::env::var("KV0_TEST_BACKEND").as_deref() != Ok("moraine");
     let r = repo.clone();
     let (dataset_v1, state_v1) = block_on(async move {
         let d = r.append_records("dataset", vec![rec("a", 1)]).await?;
-        if tags {
-            r.tag_records("dataset", "v1", None).await?;
-        }
+        r.tag_records("dataset", "v1", None).await?;
         let s = r
             .append_records("state", vec![rec("k", 1), rec("j", 1)])
             .await?;
@@ -55,10 +51,6 @@ fn records_keep_the_newest_row_per_key_and_tags_pin_one_table() {
     assert_eq!(got.len(), 1);
     assert_eq!(got[0].data["v"], 3);
     assert_eq!(read("state", RecordQuery::default()).len(), 2);
-    if !tags {
-        let _ = (dataset_v1, state_v1);
-        return;
-    }
     let r = repo.clone();
     let tables = block_on(async move {
         r.optimize().await?;

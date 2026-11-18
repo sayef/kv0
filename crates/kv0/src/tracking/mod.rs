@@ -1340,7 +1340,14 @@ async fn sort_metrics(t: &mut TableRef, live: Arc<HashSet<u64>>) -> Result<bool>
                 // One bucket at a time is the memory bound; keep the read-ahead small too.
                 let scan = Scan::filter(filter).files(files.to_vec()).bounded();
                 let batches = src.scan(scan).await?;
-                sorted_points(batches, &live)
+                // Engines that store each point's run (moraine) get it back on the new rows.
+                let run_of = runs_of_points(&batches)?;
+                let out = sorted_points(batches, &live)?;
+                if run_of.is_empty() {
+                    Ok(out)
+                } else {
+                    out.iter().map(|b| with_runs(b, &run_of)).collect()
+                }
             }
         })
         .map_ok(|batches| futures::stream::iter(batches.into_iter().map(Ok)))
@@ -1354,6 +1361,31 @@ async fn sort_metrics(t: &mut TableRef, live: Arc<HashSet<u64>>) -> Result<bool>
     t.replace(removed, schema::METRICS_LOGICAL.clone(), stream, Some(tag))
         .await?;
     Ok(true)
+}
+
+/// The run of each series in metrics rows that carry a `run_id` column (empty when they do
+/// not). A statistics row's series is in `step`.
+fn runs_of_points(batches: &[RecordBatch]) -> Result<HashMap<u64, String>> {
+    let mut out = HashMap::new();
+    for b in batches {
+        let Some(run) = b
+            .column_by_name("run_id")
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+        else {
+            continue;
+        };
+        let id = col::<Int64Array>(b, "series_id")?;
+        let step = col::<Int64Array>(b, "step")?;
+        for i in 0..b.num_rows() {
+            let sid = match id.value(i) {
+                0 => step.value(i),
+                s => s,
+            };
+            out.entry(series_from_i64(sid))
+                .or_insert_with(|| run.value(i).to_string());
+        }
+    }
+    Ok(out)
 }
 
 /// Points of `batches` sorted by `(series_id, step)` (the stored, signed series id), keeping the last in scan order of points
@@ -2631,6 +2663,7 @@ impl Core {
                 .await
             )?;
             ds.index(&["item_id", "run_id"]).await?;
+            ds.maintain().await?;
             if ds.version() != before {
                 self.keep_record_ds(&name, ds).await;
             }
@@ -2654,11 +2687,15 @@ impl Core {
             }
             .await
         )?;
-        if !sorted {
-            return Ok(()); // nothing new: no rewrite, no index work
+        if sorted {
+            // Indexes only the new files when the index exists (nothing new: no index work).
+            t.metrics.index(&["series_id"]).await?;
         }
-        // Indexes only the new files when the index exists.
-        t.metrics.index(&["series_id"]).await
+        // The engine's own upkeep, where it has one (moraine: checkpoint, log cleanup, vacuum).
+        for ds in [&mut t.runs, &mut t.params, &mut t.series, &mut t.metrics] {
+            ds.maintain().await?;
+        }
+        Ok(())
     }
 }
 

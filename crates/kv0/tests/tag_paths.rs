@@ -38,14 +38,14 @@ fn key_value_tags_under_a_path_with_special_characters_protect_their_version() {
             Some(&b"v1"[..]),
             "{name}"
         );
-        // Lance keeps tags under `_refs/`, Delta under `_kv0/tags/`.
-        let refs = std::path::Path::new(&path).join(
-            if std::env::var("KV0_TEST_BACKEND").as_deref() == Ok("delta") {
-                "_kv0/tags"
-            } else {
-                "_refs"
-            },
-        );
+        // Lance keeps tags under `_refs/`, Delta under `_kv0/tags/`, moraine (pins) with the
+        // `ops` table.
+        let refs =
+            std::path::Path::new(&path).join(match std::env::var("KV0_TEST_BACKEND").as_deref() {
+                Ok("delta") => "_kv0/tags",
+                Ok("moraine") => "ops/meta/pins",
+                _ => "_refs",
+            });
         assert!(
             refs.exists(),
             "{name}: the tag is in the dataset's own directory"
@@ -137,7 +137,13 @@ fn records_tags_on_tables_with_special_characters_protect_their_version() {
     })
     .unwrap_err();
     assert!(e.to_string().contains("kept"), "{e}");
-    let names: Vec<String> = std::fs::read_dir(d.path().join("repo~x/records"))
+    // moraine keeps records tables next to the others (`rec-<encoded name>`).
+    let dir = if std::env::var("KV0_TEST_BACKEND").as_deref() == Ok("moraine") {
+        d.path().join("repo~x")
+    } else {
+        d.path().join("repo~x/records")
+    };
+    let names: Vec<String> = std::fs::read_dir(dir)
         .unwrap()
         .map(|e| e.unwrap().file_name().into_string().unwrap())
         .collect();
@@ -149,7 +155,10 @@ fn records_tags_on_tables_with_special_characters_protect_their_version() {
 
 #[test]
 fn records_tables_from_the_earlier_directory_names_are_moved_with_their_tags() {
-    if std::env::var("KV0_TEST_BACKEND").as_deref() == Ok("delta") {
+    if matches!(
+        std::env::var("KV0_TEST_BACKEND").as_deref(),
+        Ok("delta" | "moraine")
+    ) {
         return; // the `~XX` names were only ever written as Lance datasets
     }
     use kv0::rt::block_on;
@@ -319,7 +328,10 @@ fn reads_by_tag_or_cleaned_up_version_finish_promptly() {
 
 #[test]
 fn processes_opening_an_earlier_layout_at_once_all_succeed() {
-    if std::env::var("KV0_TEST_BACKEND").as_deref() == Ok("delta") {
+    if matches!(
+        std::env::var("KV0_TEST_BACKEND").as_deref(),
+        Ok("delta" | "moraine")
+    ) {
         return; // the `~XX` names were only ever written as Lance datasets
     }
     use kv0::rt::block_on;

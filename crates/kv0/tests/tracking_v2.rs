@@ -8,17 +8,6 @@ use kv0::rt::block_on;
 use kv0::tracking::{NewRun, Repo, RepoOptions, RunStatus, StepRange, Track};
 use serde_json::json;
 
-/// Whether the engine under test has maintenance (optimize, version cleanup, background
-/// compaction) and tags. The moraine engine gets them with moraine's maintenance and version
-/// pins; until then the tests of those features are skipped there.
-fn maintains(test: &str) -> bool {
-    let yes = std::env::var("KV0_TEST_BACKEND").as_deref() != Ok("moraine");
-    if !yes {
-        eprintln!("{test}: skipped on moraine, which has no maintenance or tags yet");
-    }
-    yes
-}
-
 fn opts(wal: &Path) -> RepoOptions {
     RepoOptions {
         flush_interval: None,
@@ -354,9 +343,6 @@ fn runs_tables_from_before_gain_the_new_columns() {
 
 #[test]
 fn records_append_read_by_version_and_tag() {
-    if !maintains("records_append_read_by_version_and_tag") {
-        return;
-    }
     use kv0::tracking::{At, NewRecord, RecordQuery};
     let (_d, uri, wal) = setup();
     let repo = open(&uri, &wal);
@@ -582,9 +568,6 @@ fn series_stats_follow_flushes_and_crashes() {
 
 #[test]
 fn optimize_sorts_points_and_drops_overwritten_steps() {
-    if !maintains("optimize_sorts_points_and_drops_overwritten_steps") {
-        return;
-    }
     let (_d, uri, wal) = setup();
     let repo = open(&uri, &wal);
     let run = repo
@@ -747,11 +730,9 @@ fn statistics_agree_with_reads_when_a_step_is_logged_again() {
         (2, Some(3.0), Some(1.0), 6, 3.0)
     );
     // Exact after optimize too, from one stored delta.
-    if maintains("statistics_agree_with_reads_when_a_step_is_logged_again (optimize)") {
-        let r = repo.clone();
-        block_on(async move { r.optimize().await }).unwrap();
-        assert_eq!(stats(&repo), st);
-    }
+    let r = repo.clone();
+    block_on(async move { r.optimize().await }).unwrap();
+    assert_eq!(stats(&repo), st);
     // Another handle that never wrote the series sees the same.
     assert_eq!(stats(&open(&uri, &wal.join("other"))), st);
 }
@@ -818,9 +799,6 @@ fn a_time_range_read_never_returns_an_overwritten_point() {
 
 #[test]
 fn optimize_rewrites_only_new_fragments_and_skips_when_nothing_is_new() {
-    if !maintains("optimize_rewrites_only_new_fragments_and_skips_when_nothing_is_new") {
-        return;
-    }
     let (_d, uri, wal) = setup();
     let repo = open(&uri, &wal);
     let run = repo.create_run(NewRun::default()).unwrap();
@@ -888,9 +866,6 @@ fn optimize_rewrites_only_new_fragments_and_skips_when_nothing_is_new() {
 
 #[test]
 fn optimize_after_compaction_merged_sorted_fragments_keeps_statistics_exact() {
-    if !maintains("optimize_after_compaction_merged_sorted_fragments_keeps_statistics_exact") {
-        return;
-    }
     // Background compaction may merge fragments optimize sorted (with their exact statistics)
     // into new ones; the next optimize must not count those points twice or drop them.
     let (_d, uri, wal) = setup();
@@ -943,9 +918,6 @@ fn optimize_after_compaction_merged_sorted_fragments_keeps_statistics_exact() {
 
 #[test]
 fn optimize_folds_superseded_run_rows() {
-    if !maintains("optimize_folds_superseded_run_rows") {
-        return;
-    }
     let (_d, uri, wal) = setup();
     let repo = open(&uri, &wal);
     let run = repo
@@ -998,9 +970,6 @@ fn optimize_folds_superseded_run_rows() {
 
 #[test]
 fn a_change_buffered_before_a_fold_keeps_its_fields() {
-    if !maintains("a_change_buffered_before_a_fold_keeps_its_fields") {
-        return;
-    }
     // Review F1: the training process buffers a description; the web app renames the run and
     // flushes; the server optimizes (folding run rows); then the training process flushes. Its
     // description has an older sequence number than the rename but sets another field.

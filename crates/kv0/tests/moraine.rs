@@ -749,27 +749,6 @@ fn a_memory_repository_shares_one_store_across_its_tables() {
     assert!(tables.is_empty());
 }
 
-/// Maintenance, tags and older versions say what they wait for instead of doing half of it.
-#[test]
-fn maintenance_and_tags_are_not_supported_yet() {
-    moraine();
-    let dir = tempfile::tempdir().unwrap();
-    let uri = dir.path().join("repo").to_string_lossy().into_owned();
-    let repo = trk_open_at(&uri, trk_opts(&dir.path().join("wal"), &HashMap::new()));
-    write_run(&repo, "a");
-    let r = repo.clone();
-    let (opt, tag) = block_on(async move {
-        (
-            r.optimize().await.map(|_| ()),
-            r.tag_records("evals", "v1", None).await.map(|_| ()),
-        )
-    });
-    for e in [opt, tag] {
-        assert!(matches!(e, Err(kv0::Error::NotSupported(_))), "{e:?}");
-    }
-    close(&repo);
-}
-
 /// A quick timing sanity check of one tracking workload on Lance and on moraine, through the
 /// same API in one build (`cargo test --features moraine --test moraine -- --ignored
 /// --nocapture timing`). Not a benchmark: one repetition, local disk, whatever build profile

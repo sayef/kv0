@@ -14,9 +14,15 @@
 //! - moraine table names are `[a-z0-9][a-z0-9_-]{0,63}`. A records table `records/<dir name>`
 //!   becomes `rec-<base32 of the dir name>` (shortened with a hash when long); its directory name
 //!   is kept in `_kv0/records/<table name>`, written before the table.
-//! - Maintenance (compaction, version cleanup), tags and reads of older versions are not
-//!   implemented yet: they wait for moraine's maintenance and version pins.
+//! - Tags are moraine pins (see [`pins`]). moraine keeps no other old versions readable: a
+//!   handle reads the latest version, or a tagged one.
+//! - Maintenance is moraine's (compaction, checkpoints, log cleanup, vacuum on server time),
+//!   plus kv0's own removal of files that a version cleanup or a purge asks to go sooner than
+//!   moraine's grace period (see [`erase`]).
 
+pub(crate) mod erase;
+pub(crate) mod pins;
+pub(crate) mod read;
 pub(crate) mod table;
 
 use std::sync::Arc;
@@ -57,9 +63,14 @@ pub(crate) fn error(e: moraine::Error) -> Error {
         M::UnsupportedTableFeature(_) | M::ConditionalWritesUnsupported(_) => {
             Error::NotSupported(e.to_string())
         }
-        M::TooManyConflicts { .. } | M::TableExistsWithDifferentSchema(_) => {
-            Error::Conflict(e.to_string())
-        }
+        M::TooManyConflicts { .. }
+        | M::TableExistsWithDifferentSchema(_)
+        | M::FilesChanged(_)
+        | M::Fenced { .. } => Error::Conflict(e.to_string()),
+        M::PinNotFound(_) | M::VersionNotAvailable(_) => Error::NotFound(e.to_string()),
+        // Named as a missing data file, which callers that plan again on the newest version
+        // (optimize) recognise.
+        M::SnapshotExpired => Error::NotFound(format!("{e} (a data file, .parquet, is missing)")),
         M::CorruptLog(_) => Error::Corruption(e.to_string()),
         M::Storage(ref s) if matches!(s, object_store::Error::NotFound { .. }) => {
             Error::NotFound(e.to_string())
@@ -71,6 +82,19 @@ pub(crate) fn error(e: moraine::Error) -> Error {
         | M::CommitDeadlineExceeded { .. } => Error::Io(e.to_string()),
         other => Error::Storage(Box::new(other)),
     }
+}
+
+/// One pass of moraine's upkeep for a kv0 table: checkpoint, log cleanup and vacuum (each
+/// under its moraine lease). Compaction is kv0's call (`merge_small`, `optimize`), and kv0
+/// builds no sidecars and queues no writes.
+pub(crate) async fn maintain(table: &moraine::Table) -> Result<moraine::MaintenanceReport> {
+    let opts = moraine::MaintainOptions {
+        build_indexes: None,
+        ingest: false,
+        compaction: None,
+        ..moraine::MaintainOptions::default()
+    };
+    table.maintain(&opts).await.map_err(error)
 }
 
 /// The repository at one location: its database, and the store kv0 keeps its own files in.
@@ -134,7 +158,13 @@ impl Repo {
         &self.db
     }
 
-    fn path(&self, rel: &str) -> Path {
+    /// The store kv0's own files (and moraine's data files, for direct reads) are reached in.
+    pub(crate) fn store(&self) -> &Arc<dyn ObjectStore> {
+        &self.store
+    }
+
+    /// The location of `rel` under the repository.
+    pub(crate) fn path(&self, rel: &str) -> Path {
         rel.split('/')
             .filter(|p| !p.is_empty())
             .fold(self.prefix.clone(), |p, part| p.join(part))
@@ -334,7 +364,7 @@ fn decode_records_name(name: &str) -> Option<String> {
 const ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
 
 /// Lowercase base32 (RFC 4648 alphabet), without padding.
-fn base32(bytes: &[u8]) -> String {
+pub(super) fn base32(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len().div_ceil(5) * 8);
     let (mut buf, mut bits) = (0u32, 0u32);
     for &b in bytes {
@@ -351,7 +381,7 @@ fn base32(bytes: &[u8]) -> String {
     out
 }
 
-fn unbase32(s: &str) -> Option<Vec<u8>> {
+pub(super) fn unbase32(s: &str) -> Option<Vec<u8>> {
     let mut out = Vec::with_capacity(s.len() * 5 / 8);
     let (mut buf, mut bits) = (0u32, 0u32);
     for c in s.bytes() {

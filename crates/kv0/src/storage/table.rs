@@ -210,6 +210,12 @@ pub(crate) trait Table: Send + Sync + 'static {
         false
     }
 
+    /// The engine's own upkeep at the end of `optimize`, where it has one (moraine: checkpoint,
+    /// log cleanup, vacuum), and moves the handle to the latest version.
+    fn maintain(&mut self) -> BoxFuture<'_, Result<()>> {
+        async { Ok(()) }.boxed()
+    }
+
     /// Tags and the versions they name, in no particular order.
     fn tags(&self) -> BoxFuture<'_, Result<Vec<(String, u64)>>>;
 

@@ -7,23 +7,17 @@ use arrow_array_59::{Array as _, ArrayRef as ArrayRef59, ListArray as ListArray5
 use arrow_schema::SchemaRef;
 use arrow_schema_59::{DataType as DataType59, Field as Field59, Schema as Schema59};
 use futures::future::BoxFuture;
-use futures::{FutureExt, StreamExt};
+use futures::{FutureExt, StreamExt, TryStreamExt};
 
+use super::pins::Pins;
 use super::{error, wal_app_id, Repo};
 use crate::error::{Error, Result};
 use crate::storage::arrow_bridge::{from_59, to_59};
+use crate::storage::oplog::FileId;
 use crate::storage::oplog::WriterMark;
 use crate::storage::pred::{to_expr, Pred};
 use crate::storage::table::{BatchStream, FileTag, Scan, Table, TableFile, TableRef, Tagged};
 use crate::storage::types::{logical_schema, seq_to_i64};
-
-/// Why an operation is missing, for [`Error::NotSupported`].
-fn later(what: &str) -> Error {
-    Error::NotSupported(format!(
-        "{what} is not implemented on the moraine engine yet (it needs moraine's maintenance and \
-         version pins)"
-    ))
-}
 
 /// Opens kv0's table `name` (see [`crate::storage::table::Root::table`]), creating it when it
 /// does not exist and `create` is set. `schema` is the table as the Lance engine stores it.
@@ -59,7 +53,8 @@ pub(crate) async fn open(
     };
     let snap = table.snapshot().await.map_err(error)?;
     Ok(Box::new(MoraineTable {
-        name: name.to_string(),
+        moraine: moraine_name,
+        repo: repo.clone(),
         table,
         snap,
     }))
@@ -128,9 +123,19 @@ fn renamed(a: &ArrayRef59, to: &DataType59) -> Result<ArrayRef59> {
 /// A table version: the moraine table and the snapshot this handle reads.
 #[derive(Clone)]
 struct MoraineTable {
-    name: String,
+    /// The moraine table's name.
+    moraine: String,
+    repo: Arc<Repo>,
     table: moraine::Table,
     snap: moraine::TableSnapshot,
+}
+
+/// The compaction `merge_small` runs: every run of small adjacent files, whatever their age.
+fn merge_policy() -> moraine::CompactionPolicy {
+    moraine::CompactionPolicy {
+        build_sidecars: false,
+        ..moraine::CompactionPolicy::full()
+    }
 }
 
 impl MoraineTable {
@@ -158,10 +163,31 @@ impl MoraineTable {
         )?)
     }
 
+    fn pins(&self) -> Pins<'_> {
+        Pins {
+            repo: &self.repo,
+            table: &self.table,
+            name: &self.moraine,
+        }
+    }
+
     /// Moves the snapshot to the newest committed version.
     async fn refresh(&mut self) -> Result<()> {
         self.snap = self.table.snapshot().await.map_err(error)?;
         Ok(())
+    }
+
+    /// Moves the snapshot to the one the handle holds after its own commit: no request.
+    fn after_commit(&mut self) {
+        self.snap = self.table.snapshot_in_hand();
+    }
+
+    /// A handle on this table at `snap`.
+    fn at(&self, snap: moraine::TableSnapshot) -> TableRef {
+        Box::new(MoraineTable {
+            snap,
+            ..self.clone()
+        })
     }
 
     fn expr(&self, pred: &Pred) -> moraine::expr::Expr {
@@ -169,7 +195,28 @@ impl MoraineTable {
     }
 
     async fn read(&self, scan: Scan) -> Result<Vec<RecordBatch>> {
-        // Without a file list (see `files`), a scan restricted to files reads them all.
+        let all = self.snap.files();
+        if let Some(ids) = &scan.files {
+            // Chosen files only: read straight from their Parquet files, unless they are all.
+            let wanted: std::collections::HashSet<&str> =
+                ids.iter().map(|f| f.0.as_str()).collect();
+            if wanted.len() != all.len() || all.iter().any(|f| !wanted.contains(f.path.as_str())) {
+                let files = all
+                    .into_iter()
+                    .filter(|f| wanted.contains(f.path.as_str()))
+                    .collect();
+                let batches = super::read::files(
+                    &self.repo,
+                    &self.moraine,
+                    &self.snap.schema(),
+                    files,
+                    scan.filter.as_ref(),
+                    scan.columns.as_deref(),
+                )
+                .await?;
+                return batches.iter().map(from_59).collect();
+            }
+        }
         let mut s = self.snap.scan();
         if let Some(p) = &scan.filter {
             s = s.filter(self.expr(p));
@@ -191,10 +238,15 @@ impl Table for MoraineTable {
         self.snap.version()
     }
 
-    /// moraine does not list a version's files yet; callers that remember which files they
-    /// read (tombstones) read the whole table instead.
     fn files(&self) -> Vec<TableFile> {
-        Vec::new()
+        self.snap
+            .files()
+            .into_iter()
+            .map(|f| TableFile {
+                id: FileId(f.path),
+                rows: f.rows.unwrap_or(0) as usize,
+            })
+            .collect()
     }
 
     fn has_column(&self, name: &str) -> bool {
@@ -211,19 +263,18 @@ impl Table for MoraineTable {
 
     fn checkout(&self, version: u64) -> BoxFuture<'_, Result<TableRef>> {
         async move {
-            if version == self.version() {
-                return Ok(self.boxed());
-            }
-            Err(later(&format!(
-                "reading version {version} of {}",
-                self.name
-            )))
+            let snap = self.pins().at_version(&self.snap, version).await?;
+            Ok(self.at(snap))
         }
         .boxed()
     }
 
-    fn checkout_tag<'a>(&'a self, _tag: &'a str) -> BoxFuture<'a, Result<TableRef>> {
-        async move { Err(later("reading a tagged version")) }.boxed()
+    fn checkout_tag<'a>(&'a self, tag: &'a str) -> BoxFuture<'a, Result<TableRef>> {
+        async move {
+            let snap = self.pins().snapshot(tag).await?;
+            Ok(self.at(snap))
+        }
+        .boxed()
     }
 
     fn scan(&self, scan: Scan) -> BoxFuture<'_, Result<Vec<RecordBatch>>> {
@@ -266,19 +317,24 @@ impl Table for MoraineTable {
                 // A replay of rows this writer already committed is skipped: the transaction
                 // id says they are in.
                 Some(m) => {
-                    let _ = self
+                    let outcome = self
                         .table
                         .txn(wal_app_id(&m.writer), seq_to_i64(m.seq))
                         .append_unchecked(batches)
                         .await
                         .map_err(error)?;
+                    if let moraine::WriteOutcome::AlreadyApplied { .. } = outcome {
+                        // Committed earlier, perhaps by another process: the newest version.
+                        return self.refresh().await;
+                    }
                 }
                 None if batches.is_empty() => return Ok(()),
                 None => {
                     self.table.append(batches).await.map_err(error)?;
                 }
             }
-            self.refresh().await
+            self.after_commit();
+            Ok(())
         }
         .boxed()
     }
@@ -304,7 +360,8 @@ impl Table for MoraineTable {
                 let f = f.as_ref().clone().with_data_type(delta_type(f.data_type()));
                 self.table.add_column(f).await.map_err(error)?;
             }
-            self.refresh().await
+            self.after_commit();
+            Ok(())
         }
         .boxed()
     }
@@ -313,51 +370,107 @@ impl Table for MoraineTable {
         async move {
             self.refresh().await?;
             let e = self.expr(&pred);
+            // Copy-on-write: the files holding matching rows are rewritten at once (moraine
+            // D27), so nothing is left for `compact_removed`.
             self.table.delete(e).await.map_err(error)?;
+            self.after_commit();
+            Ok(())
+        }
+        .boxed()
+    }
+
+    /// moraine's own compaction, which merges runs of adjacent small files with their rows in
+    /// order; the target is moraine's (its target file size), not a row count.
+    fn merge_small(&mut self, _target_rows: Option<usize>) -> BoxFuture<'_, Result<()>> {
+        async move {
+            self.table.compact(&merge_policy()).await.map_err(error)?;
             self.refresh().await
         }
         .boxed()
     }
 
-    fn merge_small(&mut self, _target_rows: Option<usize>) -> BoxFuture<'_, Result<()>> {
-        async move { Err(later("compaction")) }.boxed()
-    }
-
     fn replace(
         &mut self,
-        _remove: Vec<crate::storage::oplog::FileId>,
+        remove: Vec<FileId>,
         _schema: SchemaRef,
-        _source: BatchStream,
-        _tag: Option<FileTag>,
+        source: BatchStream,
+        tag: Option<FileTag>,
     ) -> BoxFuture<'_, Result<()>> {
-        async move { Err(later("rewriting files")) }.boxed()
+        async move {
+            let batches: Vec<RecordBatch> = source.try_collect().await?;
+            let stored = batches
+                .iter()
+                .filter(|b| b.num_rows() > 0)
+                .map(|b| self.to_stored(b))
+                .collect::<Result<Vec<_>>>()?;
+            let mut r = moraine::Replace::new()
+                .remove_all(remove.into_iter().map(|f| f.0))
+                .add_rows(stored);
+            // moraine keeps tags per file: the files kept (`tag.keep`) carry theirs already.
+            if let Some(t) = &tag {
+                r = r.tag(t.key, "1");
+            }
+            self.table.replace_files(r).await.map_err(error)?;
+            self.after_commit();
+            Ok(())
+        }
+        .boxed()
     }
 
-    fn tagged(&self, _key: &'static str) -> Tagged {
-        Tagged::default()
+    /// Files whose moraine tags hold `key`. A tagged file that compaction or a delete replaced
+    /// is not noticed (`lost` stays false); the statistics fold finds its rows by their exact
+    /// statistics instead.
+    fn tagged(&self, key: &'static str) -> Tagged {
+        Tagged {
+            files: self
+                .snap
+                .files()
+                .into_iter()
+                .filter(|f| f.tags.contains_key(key))
+                .map(|f| FileId(f.path))
+                .collect(),
+            lost: false,
+        }
     }
 
     fn compact_removed(&mut self) -> BoxFuture<'_, Result<usize>> {
-        async move { Err(later("compaction")) }.boxed()
+        // Deletes rewrite files at once (copy-on-write).
+        async move { Ok(0) }.boxed()
     }
 
+    /// No lookup indexes yet: moraine's key-index sidecar is not configured by kv0; files are
+    /// sorted by the cluster key and pruned by statistics, bloom filters and the page index.
     fn index<'a>(&'a mut self, _columns: &'a [&'static str]) -> BoxFuture<'a, Result<()>> {
-        async move { Err(later("building indexes")) }.boxed()
+        async move { Ok(()) }.boxed()
     }
 
-    fn cleanup(&self, _c: crate::storage::Cleanup) -> BoxFuture<'_, Result<(u64, u64)>> {
-        async move { Err(later("version cleanup")) }.boxed()
+    fn cleanup(&self, c: crate::storage::Cleanup) -> BoxFuture<'_, Result<(u64, u64)>> {
+        async move { super::erase::cleanup(&self.repo, &self.table, &self.moraine, c).await }
+            .boxed()
+    }
+
+    /// kv0's cleanup cadence also brings moraine's checkpoints and vacuum (see `erase`).
+    fn needs_cleanup_cadence(&self) -> bool {
+        true
+    }
+
+    fn maintain(&mut self) -> BoxFuture<'_, Result<()>> {
+        async move {
+            super::maintain(&self.table).await?;
+            self.refresh().await
+        }
+        .boxed()
     }
 
     fn tags(&self) -> BoxFuture<'_, Result<Vec<(String, u64)>>> {
-        async move { Err(later("tags")) }.boxed()
+        async move { self.pins().list().await }.boxed()
     }
 
-    fn create_tag<'a>(&'a self, _tag: &'a str, _version: u64) -> BoxFuture<'a, Result<()>> {
-        async move { Err(later("tags")) }.boxed()
+    fn create_tag<'a>(&'a self, tag: &'a str, version: u64) -> BoxFuture<'a, Result<()>> {
+        async move { self.pins().create(tag, version).await }.boxed()
     }
 
-    fn delete_tag<'a>(&'a self, _tag: &'a str) -> BoxFuture<'a, Result<()>> {
-        async move { Err(later("tags")) }.boxed()
+    fn delete_tag<'a>(&'a self, tag: &'a str) -> BoxFuture<'a, Result<()>> {
+        async move { self.pins().delete(tag).await }.boxed()
     }
 }
