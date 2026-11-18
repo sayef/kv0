@@ -7,16 +7,16 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use arrow_59::array::{Array, AsArray, RecordBatch};
+use arrow_59::datatypes::DataType;
 use bytes::Bytes;
-use deltalake_core::arrow::array::{Array, AsArray, RecordBatch};
-use deltalake_core::arrow::datatypes::DataType;
-use deltalake_core::parquet::arrow::arrow_reader::{RowSelection, RowSelector};
-#[allow(deprecated)] // see `scan`
-use deltalake_core::parquet::arrow::async_reader::ParquetObjectReader;
-use deltalake_core::parquet::arrow::async_reader::ParquetRecordBatchStreamBuilder;
-use deltalake_core::parquet::arrow::ProjectionMask;
-use deltalake_core::ObjectStore;
 use futures::TryStreamExt;
+use object_store::ObjectStore;
+use parquet::arrow::arrow_reader::{RowSelection, RowSelector};
+#[allow(deprecated)] // see `scan`
+use parquet::arrow::async_reader::ParquetObjectReader;
+use parquet::arrow::async_reader::ParquetRecordBatchStreamBuilder;
+use parquet::arrow::ProjectionMask;
 
 use super::footer_cache::FooterCache;
 use super::scan::ScanFile;
@@ -136,11 +136,11 @@ pub(crate) async fn take(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use deltalake_core::arrow::array::{BinaryArray, Int64Array};
-    use deltalake_core::arrow::datatypes::{Field, Schema};
-    use deltalake_core::logstore::object_store::ObjectStoreExt;
-    use deltalake_core::parquet::arrow::ArrowWriter;
-    use deltalake_core::Path;
+    use arrow_59::array::{BinaryArray, Int64Array};
+    use arrow_59::datatypes::{Field, Schema};
+    use object_store::path::Path;
+    use object_store::ObjectStoreExt;
+    use parquet::arrow::ArrowWriter;
 
     #[test]
     fn takes_rows_across_row_groups_in_any_order() {
@@ -160,11 +160,9 @@ mod tests {
                 ],
             )
             .unwrap();
-            let props = deltalake_core::parquet::file::properties::WriterProperties::builder()
+            let props = parquet::file::properties::WriterProperties::builder()
                 .set_max_row_group_row_count(Some(1000))
-                .set_statistics_enabled(
-                    deltalake_core::parquet::file::properties::EnabledStatistics::Page,
-                )
+                .set_statistics_enabled(parquet::file::properties::EnabledStatistics::Page)
                 .set_data_page_row_count_limit(64)
                 .set_write_batch_size(64)
                 .build();
@@ -172,8 +170,7 @@ mod tests {
             let mut w = ArrowWriter::try_new(&mut buf, schema, Some(props)).unwrap();
             w.write(&batch).unwrap();
             w.close().unwrap();
-            let store: Arc<dyn ObjectStore> =
-                Arc::new(deltalake_core::logstore::object_store::memory::InMemory::new());
+            let store: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
             let size = buf.len() as u64;
             let path = Path::from("f.parquet");
             store.put(&path, buf.into()).await.unwrap();

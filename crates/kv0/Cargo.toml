@@ -36,13 +36,17 @@ delta = [
     "dep:async-trait",
     "dep:object_store",
     "dep:arrow-schema-59",
+    "dep:arrow-59",
+    "dep:parquet",
 ]
-# The moraine engine for the tracking layer, next to Lance and Delta, while it is built up. Off
-# by default; needs Rust 1.95 (moraine's minimum), like `delta`.
+# The moraine engine, next to Lance and Delta, while it is built up. Off by default; needs
+# Rust 1.95 (moraine's minimum), like `delta`.
 # moraine brings its own S3 support, so `aws` needs nothing more for it.
 moraine = [
     "dep:morainedb",
     "dep:arrow-schema-59",
+    "dep:arrow-59",
+    "dep:parquet",
     "dep:object_store",
     "dep:async-trait",
 ]
@@ -70,6 +74,10 @@ url = { version = "2", optional = true }
 # the one deltalake-core resolves to, so one fault-injecting store serves both engines.
 morainedb = { path = "../../../moraine-main/crates/moraine", optional = true }
 arrow-schema-59 = { package = "arrow-schema", version = "59", optional = true }
+# The Delta Lake and moraine engines read their Parquet data files directly (kv0's own scans of
+# chosen files, and values fetched by row ordinal); the same versions both engines build with.
+arrow-59 = { package = "arrow", version = "59", default-features = false, optional = true }
+parquet = { version = "59", default-features = false, features = ["arrow", "async", "object_store"], optional = true }
 object_store = { version = "0.13.2", default-features = false, features = ["aws", "fs"], optional = true }
 # Implementing delta-rs's ObjectStore trait (the fault-injecting store of the test hooks).
 async-trait = { version = "0.1", optional = true }

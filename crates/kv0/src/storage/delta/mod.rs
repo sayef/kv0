@@ -14,17 +14,15 @@
 //! - A writer's committed high-water mark is a Delta `txn` action (`appId` = `kv0-wal/<writer
 //!   id>`, `version` = its highest sequence number), committed atomically with its data.
 
+pub(crate) use super::files::{filter, footer_cache, scan, take};
+
 pub(crate) mod commit;
 pub(crate) mod create;
 pub(crate) use super::faults;
-pub(crate) mod filter;
-pub(crate) mod footer_cache;
 pub(crate) mod kv;
 pub(crate) mod props;
 pub(crate) mod rows;
-pub(crate) mod scan;
 pub(crate) mod table;
-pub(crate) mod take;
 
 use std::sync::Once;
 
@@ -43,20 +41,4 @@ pub(crate) fn init() {
     });
 }
 
-/// Whether a missing object anywhere in `e`'s sources caused it.
-pub(crate) fn not_found(e: &(dyn std::error::Error + 'static)) -> bool {
-    use deltalake_core::ObjectStoreError;
-    let mut cur: Option<&(dyn std::error::Error + 'static)> = Some(e);
-    while let Some(e) = cur {
-        if let Some(ObjectStoreError::NotFound { .. }) = e.downcast_ref::<ObjectStoreError>() {
-            return true;
-        }
-        if let Some(io) = e.downcast_ref::<std::io::Error>() {
-            if io.kind() == std::io::ErrorKind::NotFound {
-                return true;
-            }
-        }
-        cur = e.source();
-    }
-    false
-}
+pub(crate) use super::files::not_found;

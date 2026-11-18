@@ -1,22 +1,25 @@
 //! [`Pred`] without a query engine: whether a file or row group may hold a matching row (from
 //! its statistics), and which rows of a record batch match.
 //!
+//! The moraine engine evaluates rows only; pruning by statistics is the Delta engine's.
+//!
 //! Statistics only ever rule rows out: anything unknown (a missing statistic, a column a file
 //! lacks, a literal of another type) counts as "may match". Rows are evaluated with SQL's null
 //! rule: a comparison with a null never matches.
+#![cfg_attr(not(feature = "delta"), allow(dead_code))]
 
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use deltalake_core::arrow::array::{
+use arrow_59::array::{
     Array, ArrayRef, AsArray, BooleanArray, Int64Array, RecordBatch, StringArray,
 };
-use deltalake_core::arrow::buffer::BooleanBuffer;
-use deltalake_core::arrow::compute::kernels::cmp;
-use deltalake_core::arrow::compute::{cast, is_not_null, is_null, prep_null_mask_filter};
-use deltalake_core::arrow::datatypes::{DataType, Int64Type};
-use deltalake_core::parquet::file::metadata::RowGroupMetaData;
-use deltalake_core::parquet::file::statistics::Statistics;
+use arrow_59::buffer::BooleanBuffer;
+use arrow_59::compute::kernels::cmp;
+use arrow_59::compute::{cast, is_not_null, is_null, prep_null_mask_filter};
+use arrow_59::datatypes::{DataType, Int64Type};
+use parquet::file::metadata::RowGroupMetaData;
+use parquet::file::statistics::Statistics;
 
 use crate::error::{Error, Result};
 use crate::storage::pred::{Cmp, Lit, Pred};
@@ -206,14 +209,14 @@ pub(crate) fn eval(pred: &Pred, batch: &RecordBatch) -> Result<BooleanArray> {
         Pred::And(ps) => {
             let mut acc = all(true);
             for p in ps {
-                acc = deltalake_core::arrow::compute::and(&acc, &eval(p, batch)?)?;
+                acc = arrow_59::compute::and(&acc, &eval(p, batch)?)?;
             }
             acc
         }
         Pred::Or(ps) => {
             let mut acc = all(false);
             for p in ps {
-                acc = deltalake_core::arrow::compute::or(&acc, &eval(p, batch)?)?;
+                acc = arrow_59::compute::or(&acc, &eval(p, batch)?)?;
             }
             acc
         }
@@ -293,8 +296,7 @@ fn strings(a: &ArrayRef) -> Result<StringArray> {
 }
 
 fn compare(a: &ArrayRef, op: Cmp, v: &Lit) -> Result<BooleanArray> {
-    let apply = |l: &dyn deltalake_core::arrow::array::Datum,
-                 r: &dyn deltalake_core::arrow::array::Datum| match op {
+    let apply = |l: &dyn arrow_59::array::Datum, r: &dyn arrow_59::array::Datum| match op {
         Cmp::Eq => cmp::eq(l, r),
         Cmp::Ne => cmp::neq(l, r),
         Cmp::Lt => cmp::lt(l, r),
@@ -398,8 +400,8 @@ mod tests {
 
     #[test]
     fn rows_follow_the_null_rule() {
-        use deltalake_core::arrow::array::Int32Array;
-        use deltalake_core::arrow::datatypes::{Field, Schema};
+        use arrow_59::array::Int32Array;
+        use arrow_59::datatypes::{Field, Schema};
         let schema = Arc::new(Schema::new(vec![
             Field::new("i", DataType::Int32, true),
             Field::new("s", DataType::Utf8, true),

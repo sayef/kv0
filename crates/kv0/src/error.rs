@@ -104,10 +104,10 @@ impl From<deltalake_core::DeltaTableError> for Error {
     }
 }
 
-#[cfg(feature = "delta")]
-impl From<deltalake_core::parquet::errors::ParquetError> for Error {
-    fn from(e: deltalake_core::parquet::errors::ParquetError) -> Self {
-        if crate::storage::delta::not_found(&e) {
+#[cfg(any(feature = "delta", feature = "moraine"))]
+impl From<parquet::errors::ParquetError> for Error {
+    fn from(e: parquet::errors::ParquetError) -> Self {
+        if crate::storage::files::not_found(&e) {
             Error::NotFound(e.to_string())
         } else {
             Error::Storage(Box::new(e))
@@ -118,11 +118,7 @@ impl From<deltalake_core::parquet::errors::ParquetError> for Error {
 #[cfg(any(feature = "delta", feature = "moraine"))]
 impl From<object_store::Error> for Error {
     fn from(e: object_store::Error) -> Self {
-        #[cfg(feature = "delta")]
-        let missing = crate::storage::delta::not_found(&e);
-        #[cfg(not(feature = "delta"))]
-        let missing = matches!(e, object_store::Error::NotFound { .. });
-        if missing {
+        if crate::storage::files::not_found(&e) {
             Error::NotFound(e.to_string())
         } else {
             Error::Io(e.to_string())

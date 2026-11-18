@@ -19,6 +19,8 @@ pub(crate) mod arrow_bridge;
 pub(crate) mod delta;
 #[cfg(any(feature = "delta", feature = "moraine"))]
 pub(crate) mod faults;
+#[cfg(any(feature = "delta", feature = "moraine"))]
+pub(crate) mod files;
 pub mod format;
 pub(crate) mod lance;
 #[cfg(feature = "moraine")]

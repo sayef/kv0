@@ -4538,6 +4538,7 @@ dependencies = [
 name = "kv0"
 version = "0.1.0-beta.2"
 dependencies = [
+ "arrow 59.3.2",
  "arrow-array 58.4.1",
  "arrow-array 59.3.2",
  "arrow-schema 58.4.1",
@@ -4557,6 +4558,7 @@ dependencies = [
  "morainedb",
  "object_store 0.13.2",
  "parking_lot",
+ "parquet",
  "serde",
  "serde_json",
  "tempfile",
@@ -5426,6 +5428,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
+name = "memmap2"
+version = "0.9.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6b0ca1155a9ecc25aa12e8313a119f32edf0255fea2f44839c4ac0a12b2ac157"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "mimalloc"
 version = "0.1.52"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5503,13 +5514,18 @@ dependencies = [
  "deltalake-core",
  "fail",
  "futures",
+ "memmap2",
  "object_store 0.13.2",
  "parquet",
+ "roaring",
  "serde",
  "serde_json",
+ "sha2 0.11.1",
  "thiserror",
  "tokio",
  "url",
+ "xorf",
+ "xxhash-rust",
 ]
 
 [[package]]
@@ -8784,10 +8800,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "66fee0b777b0f5ac1c69bb06d361268faafa61cd4682ae064a171c16c433e9e4"
 
 [[package]]
-name = "xxhash-rust"
-version = "0.8.19"
+name = "xorf"
+version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "550a2b930b62486a393c52d5c3b84bff264b28aa437ed64694d31e93b1757af7"
+checksum = "0f13846c9009c0e550697ddde851e934b5dfafbce757a5ef5edfdb27ea20803e"
+dependencies = [
+ "libm",
+]
+
+[[package]]
+name = "xxhash-rust"
+version = "0.8.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "40de123dbb523ebcc00d61ec01840ad192578afc378d859f3429caa38308fad5"
 
 [[package]]
 name = "yoke"

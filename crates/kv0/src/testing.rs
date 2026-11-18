@@ -95,7 +95,7 @@ pub fn faults_injected() -> u64 {
 /// Whether a file under the local directory `dir` holds `needle`: in its raw bytes, or, for a
 /// Parquet file (compressed, so a byte search misses), in any string or binary value once
 /// decoded. Erasure tests use it to show that deleted data is gone.
-#[cfg(feature = "delta")]
+#[cfg(any(feature = "delta", feature = "moraine"))]
 pub fn stored_anywhere(dir: &std::path::Path, needle: &[u8]) -> bool {
     let Ok(rd) = std::fs::read_dir(dir) else {
         return false;
@@ -105,19 +105,25 @@ pub fn stored_anywhere(dir: &std::path::Path, needle: &[u8]) -> bool {
         if p.is_dir() {
             return stored_anywhere(&p, needle);
         }
-        let Ok(bytes) = std::fs::read(&p) else {
-            return false;
-        };
-        if bytes.windows(needle.len()).any(|w| w == needle) {
-            return true;
-        }
-        p.extension().is_some_and(|x| x == "parquet") && parquet_holds(bytes, needle)
+        file_holds(&p, needle)
     })
 }
 
-#[cfg(feature = "delta")]
+/// [`stored_anywhere`] for one file.
+#[cfg(any(feature = "delta", feature = "moraine"))]
+pub fn file_holds(p: &std::path::Path, needle: &[u8]) -> bool {
+    let Ok(bytes) = std::fs::read(p) else {
+        return false;
+    };
+    if bytes.windows(needle.len()).any(|w| w == needle) {
+        return true;
+    }
+    p.extension().is_some_and(|x| x == "parquet") && parquet_holds(bytes, needle)
+}
+
+#[cfg(any(feature = "delta", feature = "moraine"))]
 fn parquet_holds(bytes: Vec<u8>, needle: &[u8]) -> bool {
-    use deltalake_core::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
     let Ok(reader) =
         ParquetRecordBatchReaderBuilder::try_new(bytes::Bytes::from(bytes)).and_then(|b| b.build())
     else {
@@ -131,13 +137,13 @@ fn parquet_holds(bytes: Vec<u8>, needle: &[u8]) -> bool {
     })
 }
 
-#[cfg(feature = "delta")]
-fn array_holds(a: &dyn deltalake_core::arrow::array::Array, needle: &[u8]) -> bool {
-    use deltalake_core::arrow::array::{
+#[cfg(any(feature = "delta", feature = "moraine"))]
+fn array_holds(a: &dyn arrow_59::array::Array, needle: &[u8]) -> bool {
+    use arrow_59::array::{
         BinaryArray, DictionaryArray, LargeBinaryArray, LargeListArray, LargeStringArray,
         ListArray, MapArray, StringArray, StructArray,
     };
-    use deltalake_core::arrow::datatypes::{DataType, Int32Type};
+    use arrow_59::datatypes::{DataType, Int32Type};
     let has = |v: &[u8]| v.windows(needle.len()).any(|w| w == needle);
     let any = a.as_any();
     match a.data_type() {
