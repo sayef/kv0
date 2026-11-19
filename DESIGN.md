@@ -467,7 +467,8 @@ are the object store's S3 configuration (`aws_endpoint`, `aws_region`, `aws_acce
 `aws_secret_access_key`, `allow_http`, …), and fall back to the `AWS_*` environment variables.
 The local file system and `memory://` are always available; a `memory://` store is private to
 one handle. `gs://` and `az://` locations fail with `NotSupported` until moraine supports them;
-the `gcp` and `azure` features stay so that builds that name them keep compiling.
+the `aws`, `gcp` and `azure` features enable nothing (S3 is always built in) and stay so that
+builds that name them keep compiling.
 
 S3 needs conditional writes for safe concurrent commits. AWS S3, MinIO and RustFS support them;
 the tests and CI run against RustFS because MinIO no longer publishes public container images.

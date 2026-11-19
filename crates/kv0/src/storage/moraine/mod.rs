@@ -55,7 +55,9 @@ pub(crate) fn wal_app_id(writer: &str) -> String {
 pub(crate) fn error(e: moraine::Error) -> Error {
     use moraine::Error as M;
     match e {
-        M::TableNotFound(_) => Error::NotFound(e.to_string()),
+        M::TableNotFound(_) | M::PinNotFound(_) | M::VersionNotAvailable(_) => {
+            Error::NotFound(e.to_string())
+        }
         M::InvalidSchema(_)
         | M::InvalidBatch(_)
         | M::InvalidQuery(_)
@@ -64,23 +66,25 @@ pub(crate) fn error(e: moraine::Error) -> Error {
         M::UnsupportedTableFeature(_) | M::ConditionalWritesUnsupported(_) => {
             Error::NotSupported(e.to_string())
         }
+        // Another writer or maintainer got there first; trying again later succeeds.
         M::TooManyConflicts { .. }
         | M::TableExistsWithDifferentSchema(_)
         | M::FilesChanged(_)
-        | M::Fenced { .. } => Error::Conflict(e.to_string()),
-        M::PinNotFound(_) | M::VersionNotAvailable(_) => Error::NotFound(e.to_string()),
+        | M::Fenced { .. }
+        | M::LeaseHeld { .. } => Error::Conflict(e.to_string()),
         // Named as a missing data file, which callers that plan again on the newest version
         // (optimize) recognise.
         M::SnapshotExpired => Error::NotFound(format!("{e} (a data file, .parquet, is missing)")),
-        M::CorruptLog(_) => Error::Corruption(e.to_string()),
-        M::Storage(ref s) if matches!(s, object_store::Error::NotFound { .. }) => {
-            Error::NotFound(e.to_string())
-        }
+        M::Corrupt { .. } | M::BlobCorrupt(_) => Error::Corruption(e.to_string()),
+        M::Storage(ref s) if s.is_not_found() => Error::NotFound(e.to_string()),
+        // Transient: the store was slow or unreachable, the outcome is unknown, or the table's
+        // commit task stopped before it took the write (nothing was written).
         M::Storage(_)
         | M::Timeout(_)
         | M::Throttled { .. }
         | M::OutcomeUnknown { .. }
-        | M::CommitDeadlineExceeded { .. } => Error::Io(e.to_string()),
+        | M::CommitDeadlineExceeded { .. }
+        | M::Cancelled => Error::Io(e.to_string()),
         other => Error::Storage(Box::new(other)),
     }
 }
@@ -89,12 +93,10 @@ pub(crate) fn error(e: moraine::Error) -> Error {
 /// under its moraine lease). Compaction is kv0's call (`merge_small`, `optimize`), and kv0
 /// builds no sidecars and queues no writes.
 pub(crate) async fn maintain(table: &moraine::Table) -> Result<moraine::MaintenanceReport> {
-    let opts = moraine::MaintainOptions {
-        build_indexes: None,
-        ingest: false,
-        compaction: None,
-        ..moraine::MaintainOptions::default()
-    };
+    let opts = moraine::MaintainOptions::default()
+        .build_indexes(None)
+        .ingest(false)
+        .compaction(None);
     table.maintain(&opts).await.map_err(error)
 }
 

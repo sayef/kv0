@@ -25,8 +25,9 @@ Do not put credentials in code you commit. Prefer the environment, instance role
 credentials.
 
 Google Cloud Storage (`gs://`) and Azure Blob Storage (`az://`) are not supported for now:
-opening such a location fails with `errors.NotSupported`. The `gcp` and `azure` cargo features
-still exist, so builds that enable them keep compiling, but they enable nothing usable yet.
+opening such a location fails with `errors.NotSupported`. The `aws`, `gcp` and `azure` cargo
+features still exist, so builds that enable them keep compiling, but they enable nothing: S3 is
+always built in, and the other two have no backend yet.
 
 ## Storage engine
 

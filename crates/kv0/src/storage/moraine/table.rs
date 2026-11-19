@@ -78,10 +78,7 @@ fn definition(name: &str, schema: &SchemaRef) -> Result<(Arc<Schema>, moraine::T
     };
     Ok((
         Arc::new(Schema::new(fields)),
-        moraine::TableOptions {
-            cluster_by: cluster.iter().map(|c| c.to_string()).collect(),
-            ..Default::default()
-        },
+        moraine::TableOptions::default().cluster_by(cluster.iter().copied()),
     ))
 }
 
@@ -149,10 +146,7 @@ struct MoraineTable {
 
 /// The compaction `merge_small` runs: every run of small adjacent files, whatever their age.
 fn merge_policy() -> moraine::CompactionPolicy {
-    moraine::CompactionPolicy {
-        build_sidecars: false,
-        ..moraine::CompactionPolicy::full()
-    }
+    moraine::CompactionPolicy::full().build_sidecars(false)
 }
 
 impl MoraineTable {
@@ -316,7 +310,7 @@ impl Table for MoraineTable {
                         .append_unchecked(batches)
                         .await
                         .map_err(error)?;
-                    if let moraine::WriteOutcome::AlreadyApplied { .. } = outcome {
+                    if !outcome.is_committed() {
                         // Committed earlier, perhaps by another process: the newest version.
                         return self.refresh().await;
                     }
@@ -400,7 +394,7 @@ impl Table for MoraineTable {
                     Err(e) => {
                         let m = e.to_string();
                         *slot.lock() = Some(e);
-                        Some(Err(moraine::Error::Io(std::io::Error::other(format!(
+                        Some(Err(moraine::Error::from(std::io::Error::other(format!(
                             "reading the rows of a replace: {m}"
                         )))))
                     }

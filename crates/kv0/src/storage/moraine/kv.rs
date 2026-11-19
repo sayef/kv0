@@ -413,19 +413,24 @@ impl OpLog for MoraineLog {
                 vec![MoraineLog::batch(seq, op, key, value)?]
             };
             let committed = match &mark {
-                Some(m) => match table
-                    .txn(wal_app_id(&m.writer), seq_to_i64(m.seq))
-                    .append_unchecked(batches)
-                    .await
-                    .map_err(error)?
-                {
-                    moraine::WriteOutcome::Committed(v) => Some(v),
-                    // Committed before (a lost response, or a replay): the newest version
-                    // holds it.
-                    moraine::WriteOutcome::AlreadyApplied { .. } => None,
-                },
+                Some(m) => {
+                    let outcome = table
+                        .txn(wal_app_id(&m.writer), seq_to_i64(m.seq))
+                        .append_unchecked(batches)
+                        .await
+                        .map_err(error)?;
+                    // Not committed by this call: committed before (a lost response, or a
+                    // replay), and the newest version holds it.
+                    outcome.is_committed().then(|| outcome.version())
+                }
                 None if batches.is_empty() => return Ok(Arc::new(this) as Log),
-                None => Some(table.append_unchecked(batches).await.map_err(error)?),
+                None => Some(
+                    table
+                        .append_unchecked(batches)
+                        .await
+                        .map_err(error)?
+                        .version(),
+                ),
             };
             let Some(v) = committed else {
                 let snap = table.snapshot().await.map_err(error)?;
@@ -525,10 +530,7 @@ impl OpLog for MoraineLog {
             }
             let table = &this.shared.table;
             table
-                .compact(&moraine::CompactionPolicy {
-                    build_sidecars: false,
-                    ..moraine::CompactionPolicy::full()
-                })
+                .compact(&moraine::CompactionPolicy::full().build_sidecars(false))
                 .await
                 .map_err(error)?;
             let snap = table.snapshot().await.map_err(error)?;

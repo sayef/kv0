@@ -19,12 +19,14 @@ all-features = true
 
 [features]
 default = ["aws", "gcp", "azure"]
-# Object store backends, passed through to moraine. Local files, `memory://` and S3 (which kv0's
-# own files need too) are always built; Google Cloud Storage and Azure Blob Storage are not
-# supported by moraine yet, so their locations fail with `NotSupported` either way.
-aws = ["morainedb/s3"]
-gcp = ["morainedb/gcs"]
-azure = ["morainedb/azure"]
+# Object store backends. They enable nothing today: local files, `memory://` and S3 (including
+# S3-compatible servers) are always built into kv0 and moraine. Google Cloud Storage and Azure
+# Blob Storage are not supported by moraine yet, so `gs://` and `az://` locations fail with
+# `NotSupported` whichever features are on. I kept the three names so that builds that select
+# them keep compiling, and so that each can turn on a backend once there is one.
+aws = []
+gcp = []
+azure = []
 
 [dependencies]
 # moraine, from a local checkout of its main branch until it is published.
