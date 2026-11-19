@@ -28,7 +28,7 @@ use arrow_array::{Array, ArrayRef, BinaryArray, Int32Array, Int64Array, Int8Arra
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use bytes::Bytes;
 use futures::future::BoxFuture;
-use futures::FutureExt;
+use futures::{FutureExt, StreamExt as _, TryStreamExt as _};
 use object_store::ObjectStoreExt as _;
 use parking_lot::Mutex;
 
@@ -214,6 +214,44 @@ impl MoraineLog {
             path: data_path(&self.shared.repo, &f.path),
             size: f.size,
         }
+    }
+
+    /// The rows of one chunk of a rewrite, as batches of the table: values the chunk left in
+    /// storage are read from this version, and marks are dropped (they are transaction ids
+    /// here, never rows).
+    async fn chunk_batches(&self, mut chunk: SnapChunk) -> Result<Vec<RecordBatch>> {
+        let key58 = chunk.key.finish();
+        let value58 = chunk.value.finish();
+        let stored: HashSet<usize> = chunk.stored.iter().map(|s| s.0).collect();
+        let wanted: Vec<u64> = chunk.stored.iter().map(|s| s.1).collect();
+        let mut taken: HashMap<usize, Bytes> = chunk
+            .stored
+            .iter()
+            .map(|s| s.0)
+            .zip(self.take_values(&wanted).await?)
+            .collect();
+        let keep: Vec<usize> = (0..chunk.len())
+            .filter(|i| chunk.op[*i] != OP_MARK)
+            .collect();
+        let mut batches = Vec::with_capacity(keep.len().div_ceil(BATCH_ROWS));
+        for part in keep.chunks(BATCH_ROWS) {
+            let seq = Int64Array::from_iter_values(part.iter().map(|i| seq_to_i64(chunk.seq[*i])));
+            let op = Int8Array::from_iter_values(part.iter().map(|i| chunk.op[*i] as i8));
+            let key = BinaryArray::from_iter_values(part.iter().map(|i| key58.value(*i)));
+            let values: Vec<Option<Bytes>> = part
+                .iter()
+                .map(|i| {
+                    if stored.contains(i) {
+                        taken.remove(i)
+                    } else {
+                        (!value58.is_null(*i)).then(|| Bytes::copy_from_slice(value58.value(*i)))
+                    }
+                })
+                .collect();
+            let value: BinaryArray = values.iter().map(|v| v.as_deref()).collect();
+            batches.push(MoraineLog::batch(seq, op, key, value)?);
+        }
+        Ok(batches)
     }
 
     /// The values at `addrs`, read file by file (files in parallel). A file this version no
@@ -468,55 +506,40 @@ impl OpLog for MoraineLog {
         let this = self.clone();
         async move {
             let removed: Vec<String> = this.files.iter().map(|f| f.path.clone()).collect();
-            let mut batches = Vec::new();
-            for mut chunk in chunks {
-                let key58 = chunk.key.finish();
-                let value58 = chunk.value.finish();
-                let stored: HashSet<usize> = chunk.stored.iter().map(|s| s.0).collect();
-                let wanted: Vec<u64> = chunk.stored.iter().map(|s| s.1).collect();
-                let mut taken: HashMap<usize, Bytes> = chunk
-                    .stored
-                    .iter()
-                    .map(|s| s.0)
-                    .zip(this.take_values(&wanted).await?)
-                    .collect();
-                // Marks are transaction ids here, never rows.
-                let keep: Vec<usize> = (0..chunk.len())
-                    .filter(|i| chunk.op[*i] != OP_MARK)
-                    .collect();
-                for part in keep.chunks(BATCH_ROWS) {
-                    let seq = Int64Array::from_iter_values(
-                        part.iter().map(|i| seq_to_i64(chunk.seq[*i])),
-                    );
-                    let op = Int8Array::from_iter_values(part.iter().map(|i| chunk.op[*i] as i8));
-                    let key = BinaryArray::from_iter_values(part.iter().map(|i| key58.value(*i)));
-                    let values: Vec<Option<Bytes>> = part
-                        .iter()
-                        .map(|i| {
-                            if stored.contains(i) {
-                                taken.remove(i)
-                            } else {
-                                (!value58.is_null(*i))
-                                    .then(|| Bytes::copy_from_slice(value58.value(*i)))
-                            }
-                        })
-                        .collect();
-                    let value: BinaryArray = values.iter().map(|v| v.as_deref()).collect();
-                    batches.push(MoraineLog::batch(seq, op, key, value)?);
-                }
-            }
-            if removed.is_empty() && batches.is_empty() {
+            let has_rows = chunks
+                .iter()
+                .any(|c| (0..c.len()).any(|i| c.op[i] != OP_MARK));
+            if removed.is_empty() && !has_rows {
                 return Ok(Arc::new(this) as Log);
             }
+            // The rows are written as they are built, one chunk at a time (moraine D68), so a
+            // rewrite never holds every value at once. An error of kv0's own is kept as it is,
+            // so a caller still tells a missing file from other failures.
+            let failed: Arc<Mutex<Option<Error>>> = Arc::default();
+            let slot = failed.clone();
+            let source = this.clone();
+            let rows = futures::stream::iter(chunks)
+                .then(move |chunk| {
+                    let source = source.clone();
+                    async move { source.chunk_batches(chunk).await }
+                })
+                .map_ok(|batches| futures::stream::iter(batches.into_iter().map(Ok)))
+                .try_flatten()
+                .map_err(move |e: Error| {
+                    let m = e.to_string();
+                    *slot.lock() = Some(e);
+                    moraine::Error::from(std::io::Error::other(format!(
+                        "building the rows of a rewrite: {m}"
+                    )))
+                });
             let table = &this.shared.table;
-            table
-                .replace_files(
-                    moraine::Replace::new()
-                        .remove_all(removed)
-                        .add_rows(batches),
-                )
-                .await
-                .map_err(error)?;
+            let replaced = table
+                .replace_files(moraine::Replace::new().remove_all(removed).add_stream(rows))
+                .await;
+            if let Some(e) = failed.lock().take() {
+                return Err(e);
+            }
+            replaced.map_err(error)?;
             Ok(this.wrap(table.snapshot_in_hand(), None))
         }
         .boxed()
