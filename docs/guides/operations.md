@@ -118,7 +118,8 @@ other writer. A file no commit references yet (a writer's upload for a commit in
 taken by purge; moraine removes such a file only after its grace period, and a writer deletes the
 files of a commit it knows did not land at once. Only one purge runs on a table at a time: a
 version cleanup that finds another one running leaves the work to it, and `purge` waits for it
-(up to two minutes, then fails with `errors.Conflict`).
+(up to five and a half minutes, longer than the five-minute lease a purge holds, so that the
+lease of a purger that died runs out first; then it fails with `errors.Conflict`).
 Files that a removed version committed are erased however recent they are. Readers that hold an
 older version lose it: a key-value handle reading a value whose file is gone refreshes and reads it
 again; a tracking query in flight may fail and should be retried. Erasure does not reach the

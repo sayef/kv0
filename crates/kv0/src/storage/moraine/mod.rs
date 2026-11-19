@@ -157,6 +157,11 @@ impl Repo {
         &self.uri
     }
 
+    /// Whether the repository is on local disk or in memory.
+    pub(crate) fn is_local(&self) -> bool {
+        is_local(&self.uri) || self.uri.starts_with("memory://")
+    }
+
     pub(crate) fn database(&self) -> &moraine::Database {
         &self.db
     }

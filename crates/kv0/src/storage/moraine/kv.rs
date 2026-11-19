@@ -615,7 +615,7 @@ impl OpLog for MoraineLog {
     }
 
     fn cleanup(&self, c: crate::storage::Cleanup) -> BoxFuture<'_, Result<(u64, u64)>> {
-        async move { super::erase::cleanup(&self.shared.table, c).await }.boxed()
+        async move { super::erase::cleanup(&self.shared.table, c, self.shared.repo.is_local()).await }.boxed()
     }
 
     fn tags(&self) -> BoxFuture<'_, Result<Vec<(String, u64)>>> {

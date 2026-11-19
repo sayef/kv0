@@ -437,7 +437,7 @@ impl Table for MoraineTable {
     }
 
     fn cleanup(&self, c: crate::storage::Cleanup) -> BoxFuture<'_, Result<(u64, u64)>> {
-        async move { super::erase::cleanup(&self.table, c).await }.boxed()
+        async move { super::erase::cleanup(&self.table, c, self.repo.is_local()).await }.boxed()
     }
 
     fn maintain(&mut self) -> BoxFuture<'_, Result<()>> {
