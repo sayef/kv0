@@ -1,4 +1,4 @@
-//! The concurrency and crash suite of the moraine engine's tracking layer: several processes
+//! The concurrency and crash suite of the tracking layer: several processes
 //! writing, deleting and reading at once; object-store faults (errors, timeouts, lost
 //! responses, duplicated requests); and crashes at every write of a flush, so between the
 //! commits of its four tables.
@@ -15,8 +15,7 @@
 //! - `KV0_TEST_S3_ENDPOINT`: also runs the S3 variants against an S3-compatible server.
 //!
 //! The scenarios with maintenance (`optimize`, version cleanup, purge), tags and key-value
-//! databases are the shared chaos suite's (`tests/chaos.rs` with `KV0_TEST_BACKEND=moraine`).
-#![cfg(feature = "moraine")]
+//! databases are in the shared chaos suite (`tests/chaos.rs`).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -28,15 +27,8 @@ use kv0::testing::{set_faults, Crash, FaultKind, Faults, StoreOp};
 use kv0::tracking::{NewRecord, NewRun, RecordQuery, Repo, RepoOptions, StepRange, TrackPoint};
 use serde_json::json;
 
-const ENGINE: &str = "moraine";
-
 /// Points each run logs.
 const STEPS: i64 = 30;
-
-fn moraine() {
-    // Every test of this binary sets the same value, so the races between them are harmless.
-    std::env::set_var("KV0_TEST_BACKEND", ENGINE);
-}
 
 /// SplitMix64.
 fn mix(mut x: u64) -> u64 {
@@ -169,7 +161,6 @@ impl Spawner {
             "--nocapture",
             "--test-threads=1",
         ])
-        .env("KV0_TEST_BACKEND", ENGINE)
         .env("KV0_CHAOS_ROLE", role)
         .env("KV0_CHAOS_URI", &self.uri)
         .env("KV0_CHAOS_DIR", &self.dir)
@@ -496,7 +487,6 @@ fn trk_check(repo: &Repo, live: &[String], gone: &[String], records: bool) {
 /// Writers from several processes append while one deletes runs written before and one reads:
 /// no append is lost or stored twice, and the deleted runs are gone from every table.
 fn trk_race(uri: &str, storage: &HashMap<String, String>, writers: u32, runs: u32) {
-    moraine();
     let seed = seed("trk_race");
     let dir = tempfile::tempdir().unwrap();
     let sp = Spawner::new(uri, dir.path(), storage, seed);
@@ -548,7 +538,6 @@ fn tracking_writers_deletes_and_readers_race_on_s3() {
 }
 
 fn trk_faults(uri: &str, storage: &HashMap<String, String>, writers: u32, runs: u32) {
-    moraine();
     let seed = seed("trk_faults");
     let dir = tempfile::tempdir().unwrap();
     let sp = Spawner::new(uri, dir.path(), storage, seed);
@@ -597,7 +586,6 @@ fn tracking_writers_survive_object_store_faults_on_s3() {
 /// params, series and metrics tables one after another (a crash between table commits among
 /// them): the replay commits exactly what the crash left uncommitted, once.
 fn crash_every_write(uri_of: impl Fn(&Path) -> (String, HashMap<String, String>)) {
-    moraine();
     let seed = seed("trk_crash");
     for after in [false, true] {
         for nth in 1.. {
@@ -653,7 +641,6 @@ fn tracking_crash_at_every_write_of_a_flush_then_replay_on_s3() {
 /// again replays the write-ahead log: each table holds the flush once.
 #[test]
 fn lost_commit_responses_then_replay_store_each_write_once() {
-    moraine();
     let seed = seed("trk_lost");
     let dir = tempfile::tempdir().unwrap();
     let uri = dir.path().join("repo").to_string_lossy().into_owned();
@@ -672,7 +659,6 @@ fn lost_commit_responses_then_replay_store_each_write_once() {
 /// runs are there.
 #[test]
 fn concurrent_creators_make_each_table_once() {
-    moraine();
     let seed = seed("create_race");
     let dir = tempfile::tempdir().unwrap();
     let uri = dir.path().join("repo").to_string_lossy().into_owned();
@@ -718,7 +704,6 @@ fn concurrent_creators_make_each_table_once() {
 /// be listed; another handle sees nothing.
 #[test]
 fn a_memory_repository_shares_one_store_across_its_tables() {
-    moraine();
     let uri = format!("memory://trk-{}", std::process::id());
     let o = RepoOptions {
         flush_interval: None,
@@ -753,7 +738,6 @@ fn a_memory_repository_shares_one_store_across_its_tables() {
 /// older version that no tag names fails with an error naming the way out, in both layers.
 #[test]
 fn only_the_latest_and_tagged_versions_are_readable() {
-    moraine();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("db").to_string_lossy().into_owned();
     let o = kv0::kv::Options {
@@ -820,161 +804,4 @@ fn only_the_latest_and_tagged_versions_are_readable() {
         "{e}"
     );
     close(&repo);
-}
-
-/// A quick timing sanity check of one tracking workload on Lance and on moraine, through the
-/// same API in one build (`cargo test --features moraine --test moraine -- --ignored
-/// --nocapture timing`). Not a benchmark: one repetition, local disk, whatever build profile
-/// the tests use.
-#[test]
-#[ignore]
-fn timing_sanity_check() {
-    use kv0::storage::Engine;
-    const RUNS: usize = 20;
-    const POINTS: i64 = 2_000;
-    const RECORDS: usize = 2_000;
-    for engine in [
-        Engine::Lance,
-        Engine::Moraine,
-        Engine::Lance,
-        Engine::Moraine,
-    ] {
-        let dir = tempfile::tempdir().unwrap();
-        let uri = dir.path().join("repo").to_string_lossy().into_owned();
-        let o = RepoOptions {
-            engine: Some(engine),
-            // Maintenance off, so only the measured work runs.
-            max_fragments: 0,
-            version_retention: None,
-            ..trk_opts(&dir.path().join("wal"), &HashMap::new())
-        };
-        let repo = trk_open_at(&uri, o.clone());
-        let pts = points(POINTS);
-        let t = Instant::now();
-        for k in 0..RUNS {
-            let run = repo
-                .create_run(NewRun {
-                    run_id: Some(format!("run-{k:03}")),
-                    ..NewRun::default()
-                })
-                .unwrap();
-            run.set_param("lr", json!(k)).unwrap();
-            run.track_many("loss", None, &pts).unwrap();
-            let r = repo.clone();
-            block_on(async move { r.flush().await }).unwrap();
-        }
-        let log = t.elapsed();
-        close(&repo);
-        let repo = trk_open_at(&uri, o.clone());
-        let t = Instant::now();
-        for k in 0..RUNS {
-            let r = repo.clone();
-            let d = block_on(async move {
-                r.read_metric(
-                    &format!("run-{k:03}"),
-                    "loss",
-                    &json!({}),
-                    StepRange::default(),
-                )
-                .await
-            })
-            .unwrap();
-            assert_eq!(d.steps.len(), POINTS as usize);
-        }
-        let reads = t.elapsed();
-        let rows: Vec<NewRecord> = (0..RECORDS)
-            .map(|i| NewRecord {
-                item_id: format!("item-{i}"),
-                run_id: Some(format!("run-{:03}", i % RUNS)),
-                data: json!({ "score": i }),
-            })
-            .collect();
-        let t = Instant::now();
-        for chunk in rows.chunks(100) {
-            let (r, c) = (repo.clone(), chunk.to_vec());
-            block_on(async move { r.append_records("evals", c).await }).unwrap();
-        }
-        let rec_write = t.elapsed();
-        let t = Instant::now();
-        let r = repo.clone();
-        let all =
-            block_on(async move { r.records("evals", RecordQuery::default()).await }).unwrap();
-        assert_eq!(all.len(), RECORDS);
-        let rec_read = t.elapsed();
-        let t = Instant::now();
-        let r = repo.clone();
-        block_on(async move { r.optimize().await }).unwrap();
-        let optimize = t.elapsed();
-        let t = Instant::now();
-        for k in 0..RUNS {
-            let r = repo.clone();
-            let d = block_on(async move {
-                r.read_metric(
-                    &format!("run-{k:03}"),
-                    "loss",
-                    &json!({}),
-                    StepRange::default(),
-                )
-                .await
-            })
-            .unwrap();
-            assert_eq!(d.steps.len(), POINTS as usize);
-        }
-        let reads_after = t.elapsed();
-        close(&repo);
-        eprintln!(
-            "{engine}: log {RUNS} runs x {POINTS} points {log:?}; read {RUNS} series {reads:?}; \
-             append {RECORDS} records in 20 commits {rec_write:?}; read them {rec_read:?}; \
-             optimize {optimize:?}; read {RUNS} series after {reads_after:?}"
-        );
-
-        // Key-value: puts with a flush every 5,000, then gets, a full scan, and a compaction.
-        const KEYS: usize = 50_000;
-        let path = dir.path().join("db").to_string_lossy().into_owned();
-        let o = kv0::kv::Options {
-            engine: Some(engine),
-            flush_interval: None,
-            max_fragments: 0,
-            version_retention: None,
-            wal_dir: Some(dir.path().join("wal-kv")),
-            ..kv0::kv::Options::default()
-        };
-        let db = kv0::kv::Db::open(&path, o.clone()).unwrap();
-        let key = |i: usize| format!("key-{:08}", (i * 7919) % KEYS);
-        let t = Instant::now();
-        for i in 0..KEYS {
-            db.put(
-                key(i).as_bytes(),
-                format!("value-{i}-{}", "v".repeat(40)).as_bytes(),
-            )
-            .unwrap();
-            if (i + 1) % 5_000 == 0 {
-                db.flush().unwrap();
-            }
-        }
-        let put = t.elapsed();
-        db.close().unwrap();
-        let t = Instant::now();
-        let db = kv0::kv::Db::open(&path, o.clone()).unwrap();
-        let open = t.elapsed();
-        let t = Instant::now();
-        for i in (0..KEYS).step_by(10) {
-            assert!(db.get(key(i).as_bytes()).unwrap().is_some());
-        }
-        let get = t.elapsed();
-        let t = Instant::now();
-        let mut it = db.iter();
-        it.seek_to_first();
-        assert_eq!(it.count(), KEYS);
-        let scan = t.elapsed();
-        let t = Instant::now();
-        db.compact().unwrap();
-        let compact = t.elapsed();
-        db.close().unwrap();
-        eprintln!(
-            "{engine}: kv put {KEYS} keys in 10 flushes {put:?}; open {open:?}; {} gets {get:?}; \
-             scan {scan:?}; compact {compact:?}",
-            KEYS / 10
-        );
-    }
 }

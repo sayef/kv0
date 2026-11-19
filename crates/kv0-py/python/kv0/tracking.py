@@ -24,28 +24,25 @@ class Repo(_Repo):
     """A tracking repository at a local path or object-store URI.
 
     Args:
-        uri: Local directory or URI (``s3://``, ``gs://``, ``az://``, ``memory://``).
-        storage_options: Object-store options passed to Lance.
+        uri: Local directory or URI (``s3://``, ``memory://``).
+        storage_options: Object-store options, such as ``aws_endpoint`` or ``aws_region``.
         create_if_missing: Create the tables when they do not exist.
         flush_rows: Commit once this many metric points are buffered.
         flush_interval: Seconds between background commits; ``None`` disables.
         version_retention: Delete versions older than this many seconds automatically; ``None``
             keeps every version.
-        orphan_grace: Seconds before version cleanup and purge delete a data file that no version
-            references (a crashed writer's uncommitted file); a running writer may be about to
-            commit it. Default one hour.
+        orphan_grace: Accepted and ignored: data files that no version references (a crashed
+            writer's uncommitted file) are deleted by moraine's vacuum after its grace period.
         wal: Log every write to a local write-ahead log before acknowledging it, so buffered
             points, parameters and run changes survive a process crash.
         wal_sync: ``"none"``, ``"batch"`` (default, fsync about every 100 ms) or ``"always"``.
         wal_dir: WAL root; default ``KV0_WAL_DIR``, else the platform cache directory.
         replay_stale_wal: Replay a write-ahead log older than 30 days whose writer's marks have
             expired; its writes may then be stored twice.
-        legacy_records: ``"error"`` (default) refuses a repository that still has the shared
-            ``records.lance`` of earlier builds; ``"allow"`` opens it, so ``legacy_records()``
-            can read the old rows for a migration and ``drop_legacy_records()`` remove them.
-        engine: Storage engine of a repository created here, ``"lance"`` or ``"delta"``; an
-            existing repository always opens with its own engine, and naming another one fails.
-            ``None`` (default) uses ``KV0_ENGINE``, else Lance.
+        legacy_records: Accepted and ignored: repositories of this kv0 never hold the shared
+            records table of earlier builds.
+        engine: Storage engine of a repository created here; only ``"moraine"`` (the default).
+            A repository written by an earlier kv0 with the Lance or Delta Lake engine is refused.
     """
 
     def __init__(

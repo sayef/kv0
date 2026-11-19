@@ -4,13 +4,13 @@ build-backend = "maturin"
 
 [project]
 name = "kv0"
-description = "Ordered key-value store and experiment-tracking tables on Lance: local disk, S3, GCS, Azure or memory"
+description = "Ordered key-value store and experiment-tracking tables on object storage (moraine, Delta Lake): local disk, S3 or memory"
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 authors = [{ name = "Saiful Islam" }]
 requires-python = ">=3.11"
-keywords = ["key-value", "lance", "object-storage", "experiment-tracking", "embedded-database"]
+keywords = ["key-value", "delta-lake", "object-storage", "experiment-tracking", "embedded-database"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",

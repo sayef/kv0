@@ -1,18 +1,18 @@
 [workspace]
 resolver = "2"
-members = ["crates/kv0", "crates/kv0-py", "crates/kv0-migrate-py"]
+members = ["crates/kv0", "crates/kv0-py"]
 
 [workspace.package]
 version = "0.1.0-beta.2"
 edition = "2021"
-rust-version = "1.94.1"
+rust-version = "1.95"
 license = "Apache-2.0"
 authors = ["Saiful Islam"]
 repository = "https://github.com/sayef/kv0"
 homepage = "https://github.com/sayef/kv0"
 
-# Thin LTO with the default codegen units: `codegen-units = 1` made release builds of Lance about
-# four times slower for no measurable gain on these workloads.
+# Thin LTO with the default codegen units: `codegen-units = 1` made release builds about four
+# times slower for no measurable gain on these workloads.
 [profile.release]
 lto = "thin"
 debug = 1

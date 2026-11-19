@@ -40,15 +40,6 @@ fn wal_files(root: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// Rows a writer's mark takes in storage: Lance keeps it as a row, Delta and moraine as a
-/// transaction id.
-fn mark_rows() -> usize {
-    usize::from(!matches!(
-        std::env::var("KV0_TEST_BACKEND").as_deref(),
-        Ok("delta" | "moraine")
-    ))
-}
-
 fn count(db: &Db) -> usize {
     let mut it = db.iter();
     it.seek_to_first();
@@ -131,7 +122,7 @@ fn sigkill_mid_write() {
             );
         }
     }
-    // Replayed writes were committed to Lance on open.
+    // Replayed writes were committed to storage on open.
     assert_eq!(db.stats().pending_ops, 0);
     db.close().unwrap();
     assert!(wal_files(&wal).is_empty(), "a clean close removes the WAL");
@@ -202,7 +193,7 @@ fn replay_after_commit_before_truncate_is_idempotent() {
     // The later flush added one put and its mark; the replay added nothing.
     assert_eq!(
         db.stats().stored_rows,
-        stored + 1 + mark_rows(),
+        stored + 1,
         "nothing was appended twice"
     );
     assert_eq!(count(&db), 90);
@@ -419,29 +410,12 @@ fn wal_marks_expire_and_a_stale_wal_needs_consent() {
     assert_eq!(db.stats().stored_rows, 21, "20 keys and orphan; no marks");
     db.close().unwrap();
 
-    if std::env::var("KV0_TEST_BACKEND").as_deref() == Ok("moraine") {
-        // moraine keeps a writer's mark (a caller transaction id) for good, so even a stale
-        // log is replayed exactly once, without consent.
-        let db = Db::open(&db_path, ttl.clone()).unwrap();
-        assert_eq!(db.get(b"orphan-2").unwrap().as_deref(), Some(&b"2"[..]));
-        db.compact().unwrap();
-        assert_eq!(db.stats().stored_rows, 22, "replayed once");
-        return;
-    }
-    let err = Db::open(&db_path, ttl.clone()).unwrap_err();
-    assert!(
-        matches!(err, kv0::Error::InvalidArgument(ref m) if m.contains("replay_stale_wal")),
-        "{err:?}"
-    );
-    let db = Db::open(
-        &db_path,
-        Options {
-            replay_stale_wal: true,
-            ..ttl
-        },
-    )
-    .unwrap();
+    // moraine keeps a writer's mark (a caller transaction id) for good, so even a stale log
+    // is replayed exactly once, without consent.
+    let db = Db::open(&db_path, ttl).unwrap();
     assert_eq!(db.get(b"orphan-2").unwrap().as_deref(), Some(&b"2"[..]));
+    db.compact().unwrap();
+    assert_eq!(db.stats().stored_rows, 22, "replayed once");
 }
 
 #[test]
@@ -467,9 +441,5 @@ fn reopening_reuses_the_writer_id_so_marks_do_not_accumulate() {
     }
     let db = Db::open(&db_path, opts(&wal)).unwrap();
     db.compact().unwrap();
-    assert_eq!(
-        db.stats().stored_rows,
-        1 + mark_rows(),
-        "one key and one writer's mark"
-    );
+    assert_eq!(db.stats().stored_rows, 1, "one key and one writer's mark");
 }

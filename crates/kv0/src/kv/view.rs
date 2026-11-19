@@ -1,6 +1,6 @@
 //! The in-memory ordered view of a key-value database.
 //!
-//! Every row stored in Lance is an operation stamped with a sequence number: a put, a point
+//! Every row stored is an operation stamped with a sequence number: a put, a point
 //! delete or a range delete. The view applies operations newest-wins by sequence number, so
 //! applying the same row twice, or applying rows out of order, converges to the same state.
 
@@ -46,17 +46,17 @@ impl Key {
 }
 
 const TOMBSTONE: u8 = 1;
-/// The value stays in Lance: the slot holds its row address (8 bytes) and length (4 bytes).
+/// The value stays in storage: the slot holds its row address (8 bytes) and length (4 bytes).
 const LAZY: u8 = 2;
 
-/// A live value: in memory, or in Lance at a row address of the view's dataset version.
+/// A live value: in memory, or in storage at a row address of the view's dataset version.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Val {
     Here(Bytes),
     Stored { addr: u64, len: usize },
 }
 
-/// A row read from storage at row address `addr`. When the reader left a large value in Lance,
+/// A row read from storage at row address `addr`. When the reader left a large value in storage,
 /// `op.value` is `None` and `stored_len` holds its length.
 #[derive(Clone, Debug)]
 pub(crate) struct Row {
@@ -65,7 +65,7 @@ pub(crate) struct Row {
     pub stored_len: Option<usize>,
 }
 
-/// Part of a view snapshot as columns (`seq`, `op`, `key`, `value`). Values kept in Lance are
+/// Part of a view snapshot as columns (`seq`, `op`, `key`, `value`). Values kept in storage are
 /// null in `value`, listed in `stored` as (row, address) to be read when writing.
 pub(crate) struct SnapChunk {
     pub seq: Vec<u64>,
@@ -170,7 +170,7 @@ impl Slot {
         &self.0[HEADER + self.key_len()..]
     }
 
-    /// Row address and length of a value kept in Lance.
+    /// Row address and length of a value kept in storage.
     fn stored(&self) -> Option<(u64, usize)> {
         (self.0[8] & LAZY != 0).then(|| {
             let p = self.payload();
@@ -251,11 +251,11 @@ fn bound(b: Bound<&[u8]>) -> Bound<&Key> {
 
 #[derive(Default)]
 pub(crate) struct View {
-    /// Values longer than this many bytes stay in Lance once committed; 0 keeps every value
+    /// Values longer than this many bytes stay in storage once committed; 0 keeps every value
     /// in memory.
     pub lazy_threshold: usize,
     map: BTreeSet<Slot>,
-    /// Live entries whose value is kept in Lance.
+    /// Live entries whose value is kept in storage.
     stored: usize,
     pub ranges: Vec<RangeTombstone>,
     /// Number of entries holding a value (not tombstones).
@@ -285,7 +285,7 @@ impl View {
         self.apply_parts(op.seq, op.kind, &op.key, op.value.as_deref(), None);
     }
 
-    /// Applies a row read from storage. A row whose value was left in Lance while reading
+    /// Applies a row read from storage. A row whose value was left in storage while reading
     /// (`stored_len`) becomes an entry pointing at it.
     pub fn apply_row(&mut self, row: Row) {
         match row.stored_len {
@@ -300,7 +300,7 @@ impl View {
         }
     }
 
-    /// Applies a put (`value`, or a value in Lance at `lazy = (addr, len)`) or a point delete
+    /// Applies a put (`value`, or a value in storage at `lazy = (addr, len)`) or a point delete
     /// (neither), already checked against range tombstones.
     fn apply_put(
         &mut self,
@@ -347,12 +347,12 @@ impl View {
         }
     }
 
-    /// Live values kept in Lance.
+    /// Live values kept in storage.
     pub fn stored_count(&self) -> usize {
         self.stored
     }
 
-    fn keeps_in_lance(&self, len: usize) -> bool {
+    fn keeps_in_storage(&self, len: usize) -> bool {
         self.lazy_threshold > 0 && len > self.lazy_threshold
     }
 
@@ -375,7 +375,7 @@ impl View {
                     None
                 };
                 let lazy = match (addr, value) {
-                    (Some(a), Some(v)) if self.keeps_in_lance(v.len()) => Some((a, v.len())),
+                    (Some(a), Some(v)) if self.keeps_in_storage(v.len()) => Some((a, v.len())),
                     _ => None,
                 };
                 self.apply_put(seq, key, value, lazy);
@@ -435,14 +435,14 @@ impl View {
         }
     }
 
-    /// Records that the committed row `(key, seq)` is at `addr`: a value already kept in Lance
+    /// Records that the committed row `(key, seq)` is at `addr`: a value already kept in storage
     /// follows it, and a large value still in memory moves out to it.
     pub fn relocate(&mut self, key: &[u8], seq: u64, addr: u64) {
         let len = match self.map.get(Key::new(key)) {
             Some(e) if e.seq() == seq && e.is_live() => e.value_len(),
             _ => return,
         };
-        if self.keeps_in_lance(len) {
+        if self.keeps_in_storage(len) {
             self.put_slot(Slot::lazy(seq, key, addr, len));
         }
     }

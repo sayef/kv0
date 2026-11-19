@@ -1,8 +1,8 @@
-//! Ordered key-value layer, stored in Lance.
+//! Ordered key-value layer, stored in a moraine database.
 //!
 //! - Keys and values are byte strings; keys are ordered byte-wise (`memcmp`).
 //! - Writes land in an in-memory view immediately (read-your-writes) and in a pending buffer that
-//!   is appended to Lance as one fragment per flush: when the buffer exceeds
+//!   is appended to storage as one file per flush: when the buffer exceeds
 //!   [`Options::write_buffer_size`], every [`Options::flush_interval`], on [`Db::flush`] and on
 //!   close. A [`WriteBatch`] is never split across flushes, so it is atomic in storage too.
 //! - Writes that were not flushed are lost if the process crashes.
@@ -46,7 +46,7 @@ pub struct Options {
     pub read_only: bool,
     /// Open a fixed version for time travel; implies `read_only`. Default `None` (latest).
     pub version: Option<u64>,
-    /// Object-store options passed to Lance, such as `aws_endpoint` or `aws_region`.
+    /// Object-store options, such as `aws_endpoint` or `aws_region`.
     pub storage_options: StorageOptions,
     /// Flush once this many bytes of writes are buffered. Default 4 MiB.
     pub write_buffer_size: usize,
@@ -56,21 +56,19 @@ pub struct Options {
     /// How often reads check storage for other writers' commits. `None` checks only on
     /// [`Db::refresh`]. Default 1 s.
     pub refresh_interval: Option<Duration>,
-    /// Compact once the dataset has more fragments than this. `0` disables automatic
+    /// Compact once the database has more small files than this. `0` disables automatic
     /// compaction. Default 32.
     pub max_fragments: usize,
     /// Keep delete markers this long when compacting, so a slower concurrent writer's older
     /// write to the same key stays deleted. Default 1 h.
     pub tombstone_grace: Duration,
-    /// Delete versions older than this automatically, checked every 20 commits. Lance databases
-    /// take it when created (Lance runs the cleanup); Delta Lake databases take it from each
-    /// writing handle, which runs the cleanup in the background. `None` keeps every version
-    /// until [`Db::cleanup_old_versions`]. Default 7 days.
+    /// Delete the data of versions older than this automatically: each writing handle runs the
+    /// cleanup in the background every 20 commits. `None` keeps every version's data until
+    /// [`Db::cleanup_old_versions`] or moraine's vacuum. Default 7 days.
     pub version_retention: Option<Duration>,
-    /// Version cleanup and purge delete data files that no version references (left by a
-    /// writer that crashed before committing) only once they are older than this, since a
-    /// running writer may be about to commit them. Keep it above the longest a commit can take.
-    /// Used by the Delta Lake engine; Lance tracks its files itself. Default 1 h.
+    /// Accepted and ignored: data files that no version references (left by a writer that
+    /// crashed before committing) are deleted by moraine's vacuum after its grace period, so a
+    /// running writer's uploads are never taken. Default 1 h.
     pub orphan_grace: Duration,
     /// Log every write to a local write-ahead log before acknowledging it, so buffered writes
     /// survive a process crash. Ignored for read-only handles and `memory://`. Default `true`.
@@ -80,28 +78,26 @@ pub struct Options {
     /// WAL root directory. `None` uses `KV0_WAL_DIR`, else the platform cache directory
     /// (see [`default_wal_root`]).
     pub wal_dir: Option<std::path::PathBuf>,
-    /// How long compaction keeps another writer's WAL mark (its committed high-water mark).
-    /// A WAL left behind longer than this cannot be replayed safely; see `replay_stale_wal`.
-    /// Default 30 days.
+    /// The age past which a write-ahead log whose writer has no committed mark is refused
+    /// without `replay_stale_wal`, and how long the view keeps writers' marks. Default 30 days.
     pub mark_ttl: Duration,
     /// Replay a WAL older than `mark_ttl` whose writer has no mark left. Its writes may then be
     /// stored twice (they read back correctly; storage holds duplicate rows). Default `false`:
     /// such a WAL fails the open with an error that names the directory.
     pub replay_stale_wal: bool,
     /// Values longer than this many bytes are not kept in memory once committed: the view holds
-    /// their row address and reads them from Lance when needed. `0` keeps every value in
+    /// their row address and reads them from storage when needed. `0` keeps every value in
     /// memory. Default 4 KiB.
     pub lazy_value_threshold: usize,
-    /// Bytes of values read from Lance kept in an LRU cache per handle. Default 64 MiB.
+    /// Bytes of values read from storage kept in an LRU cache per handle. Default 64 MiB.
     pub value_cache_size: usize,
     /// On close, save a snapshot of the view in the WAL directory when it holds at least this
     /// many entries, so the next open loads it and reads only newer fragments instead of the
     /// whole dataset. `usize::MAX` disables snapshots. Default 100 000.
     pub snapshot_min_entries: usize,
-    /// The storage engine of a database created here. An existing database always opens with
-    /// the engine it was written in; naming another one fails (a Lance database asked to open
-    /// with Delta Lake points to `kv0 migrate`). `None` uses `KV0_ENGINE` (`lance` or `delta`),
-    /// else Lance. Default `None`.
+    /// The storage engine of a database created here: moraine, the only one (`None` uses
+    /// `KV0_ENGINE`, else moraine). Naming an engine of an earlier release, or opening a
+    /// database written with one, fails with [`Error::NotSupported`]. Default `None`.
     pub engine: Option<crate::storage::Engine>,
 }
 
@@ -135,7 +131,7 @@ impl Default for Options {
 /// Per-write options for [`Db::write_opt`]: `sync` and `disable_wal`.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct WriteOptions {
-    /// Commit to Lance before returning.
+    /// Commit to storage before returning.
     pub sync: bool,
     /// Skip the write-ahead log: the write is lost if the process crashes before the next flush.
     pub disable_wal: bool,
@@ -246,7 +242,7 @@ struct Inner {
     abandoned: AtomicBool,
     /// A background flush is running.
     flushing: AtomicBool,
-    /// Values read from Lance, by row address.
+    /// Values read from storage, by row address.
     cache: Mutex<cache::ValueCache>,
     /// Reads of stored values in progress, by row address, so concurrent misses share one.
     flights: Mutex<std::collections::HashMap<u64, Arc<Flight>>>,
@@ -262,7 +258,7 @@ struct Inner {
     cleaning: Arc<AtomicBool>,
 }
 
-/// Own commits between automatic version cleanups (as Lance's automatic cleanup).
+/// Own commits between automatic version cleanups.
 pub(crate) const CLEANUP_EVERY: u64 = 20;
 
 /// Clears a flag however the task holding it ends (error, panic or a dropped task).
@@ -282,7 +278,7 @@ struct Flight {
 }
 
 /// Whether `e` says a data file is gone (as after another writer's cleanup of old versions).
-/// Lance reports a missing object as `NotFound` (see `Error`'s conversion); the message match
+/// moraine reports a missing object as `NotFound` (see `storage::moraine::error`); the message match
 /// below is only a fallback for errors that arrive without their source.
 fn missing_file(e: &Error) -> bool {
     match e {
@@ -309,7 +305,7 @@ impl std::fmt::Debug for Db {
 }
 
 impl Db {
-    /// Opens (or creates) the database at `location`: a local path or any URI Lance supports.
+    /// Opens (or creates) the database at `location`: a local path, `s3://` or `memory://`.
     pub fn open(location: &str, opts: Options) -> Result<Db> {
         let uri = storage::normalize_uri(location)?;
         let read_only = opts.read_only || opts.version.is_some();
@@ -336,8 +332,6 @@ impl Db {
                     &o.storage_options,
                     o.version,
                     o.create_if_missing && !o.read_only,
-                    o.version_retention,
-                    o.mark_ttl,
                     o.engine,
                 )
                 .await?;
@@ -646,7 +640,7 @@ impl Db {
         self.inner.from_snapshot
     }
 
-    /// Live values kept in Lance rather than in memory (diagnostics and tests).
+    /// Live values kept in storage rather than in memory (diagnostics and tests).
     #[doc(hidden)]
     pub fn stored_values(&self) -> usize {
         self.inner.state.read().view.stored_count()
@@ -720,7 +714,7 @@ impl Db {
         let cutoff = chrono::Utc::now()
             - chrono::Duration::from_std(older_than)
                 .map_err(|e| Error::InvalidArgument(e.to_string()))?;
-        let c = storage::Cleanup::before(cutoff, self.inner.opts.orphan_grace);
+        let c = storage::Cleanup::before(cutoff);
         let (_, bytes) = rt::block_on(async move { log.cleanup(c).await })?;
         Ok(bytes)
     }
@@ -765,7 +759,7 @@ impl Db {
         let log = self.inner.persist.lock().log.clone();
         let now = store::file_ids(log.as_ref());
         report.fragments_rewritten = before.iter().filter(|id| !now.contains(id)).count();
-        let erase = storage::Cleanup::erase(self.inner.opts.orphan_grace);
+        let erase = storage::Cleanup::erase();
         // Every version but the latest and tagged ones.
         let (v, b) = rt::block_on(async move { log.cleanup(erase).await })?;
         report.versions_removed = v;
@@ -907,15 +901,13 @@ impl Inner {
     }
 
     /// Counts an own commit and, every [`CLEANUP_EVERY`] of them, starts a background cleanup
-    /// of versions older than `version_retention` when the engine leaves that to kv0. At most
-    /// one runs per handle; concurrent cleanups from other handles are harmless.
+    /// of versions older than `version_retention`. At most one runs per handle; concurrent
+    /// cleanups from other handles are harmless.
     fn after_commit(&self, log: &Log) {
         let Some(retention) = self.opts.version_retention else {
             return;
         };
-        if !log.needs_cleanup_cadence()
-            || !(self.commits.fetch_add(1, Ordering::Relaxed) + 1).is_multiple_of(CLEANUP_EVERY)
-        {
+        if !(self.commits.fetch_add(1, Ordering::Relaxed) + 1).is_multiple_of(CLEANUP_EVERY) {
             return;
         }
         let Ok(age) = chrono::Duration::from_std(retention) else {
@@ -924,7 +916,7 @@ impl Inner {
         if self.cleaning.swap(true, Ordering::AcqRel) {
             return;
         }
-        let c = storage::Cleanup::before(chrono::Utc::now() - age, self.opts.orphan_grace);
+        let c = storage::Cleanup::before(chrono::Utc::now() - age);
         let (log, uri) = (log.clone(), self.uri.clone());
         let flag = ClearOnDrop(self.cleaning.clone());
         rt::detach(async move {
@@ -1164,7 +1156,7 @@ impl Inner {
     }
 
     /// Values of `keys` (whose view entries were `vals` at `reader`'s version). Values kept in
-    /// Lance are read from `reader`; if their files are gone (another writer compacted and
+    /// storage are read from `reader`; if their files are gone (another writer compacted and
     /// cleaned up old versions), the handle refreshes and reads them once more at the new
     /// version. `None` for a key that no longer exists by then.
     fn values(
@@ -1198,7 +1190,7 @@ impl Inner {
         })
     }
 
-    /// Values for `vals`, reading those kept in Lance from `reader` (one read for all misses).
+    /// Values for `vals`, reading those kept in storage from `reader` (one read for all misses).
     /// Misses another thread is already reading are waited for, not read again.
     fn resolve(&self, reader: &Log, vals: &[Option<Val>]) -> Result<Vec<Option<Bytes>>> {
         let mut out: Vec<Option<Bytes>> = Vec::with_capacity(vals.len());
@@ -1568,7 +1560,7 @@ mod tests {
     #[test]
     fn a_deleted_data_file_is_reported_as_not_found() {
         // The refresh-and-retry of moved values keys off `Error::NotFound`; this pins the
-        // conversion from Lance's error to that variant, independent of its wording.
+        // conversion from moraine's error to that variant, independent of its wording.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("db");
         let db = Db::open(
@@ -1584,18 +1576,8 @@ mod tests {
         .unwrap();
         db.put(b"a", &[1u8; 100]).unwrap();
         db.flush().unwrap();
-        // Lance keeps data files under `data/`, Delta next to `_delta_log/`, moraine under
-        // `ops/data/`.
-        let lance = path.join("data");
-        let moraine = path.join("ops/data");
-        let dir = if moraine.is_dir() {
-            moraine
-        } else if lance.is_dir() {
-            lance
-        } else {
-            path.clone()
-        };
-        for f in std::fs::read_dir(dir).unwrap() {
+        // moraine keeps the data files of the table `ops` under `ops/data/`.
+        for f in std::fs::read_dir(path.join("ops/data")).unwrap() {
             let f = f.unwrap().path();
             if f.is_file() {
                 std::fs::remove_file(f).unwrap();

@@ -10,14 +10,17 @@
 //! log entry, older checkpoints, and manifests of pins that no longer hold.
 //!
 //! A reader on an older version that meets a missing file moves to the newest version, as after
-//! any vacuum.
+//! any vacuum. Only one client purges a table at a time (moraine's purge lease): a cleanup that
+//! finds another one running leaves the work to it, an erasure waits for it.
 
 use super::error;
 use crate::error::{Error, Result};
 use crate::storage::Cleanup;
 
-/// Attempts at a purge while another client holds moraine's purge lease.
-const LEASE_ATTEMPTS: u32 = 5;
+/// How long an erasure waits for another client's purge to finish before it fails. A cleanup
+/// without erasure tries a few times and then leaves the work to that purge.
+const ERASE_WAIT: std::time::Duration = std::time::Duration::from_secs(120);
+const CLEANUP_ATTEMPTS: u32 = 3;
 
 /// Cleans up `table` as `c` asks. Returns the data files the purge erased (with `c.erase`;
 /// the files it collected otherwise) and the bytes removed.
@@ -30,18 +33,32 @@ pub(crate) async fn cleanup(table: &moraine::Table, c: Cleanup) -> Result<(u64, 
     if c.erase {
         purge = purge.erase();
     }
+    let started = std::time::Instant::now();
     let mut attempt = 0;
     let report = loop {
         match table.purge(&purge).await {
             Ok(r) => break r,
-            Err(moraine::Error::LeaseHeld { .. }) if attempt + 1 < LEASE_ATTEMPTS => {
+            Err(moraine::Error::LeaseHeld { .. })
+                if (c.erase && started.elapsed() < ERASE_WAIT)
+                    || (!c.erase && attempt + 1 < CLEANUP_ATTEMPTS) =>
+            {
                 attempt += 1;
                 tokio::time::sleep(crate::storage::backoff(attempt, 100, 2_000)).await;
             }
+            // Another client's purge is collecting removed files now; a cleanup without
+            // erasure leaves it to that one.
+            Err(moraine::Error::LeaseHeld { .. }) if !c.erase => {
+                tracing::debug!(
+                    table = table.name(),
+                    "kv0: another client is purging; cleanup skipped"
+                );
+                return Ok((0, vacuumed));
+            }
             Err(e @ moraine::Error::LeaseHeld { .. }) => {
                 return Err(Error::Conflict(format!(
-                    "{e}: another handle is cleaning up {} now; try again later",
-                    table.name()
+                    "{e}: another handle has been purging {} for over {} s; try again later",
+                    table.name(),
+                    ERASE_WAIT.as_secs()
                 )))
             }
             Err(e) => return Err(error(e)),

@@ -23,6 +23,6 @@ it.seek(b"key_")
 while (item := it.next()) is not None:
     print(item)
 
-db.flush()  # commit buffered writes as one Lance version
+db.flush()  # commit buffered writes as one version
 print("version", db.version)
 db.close()

@@ -1,8 +1,7 @@
 //! The tracker's requests: per-field run updates, bulk reads, change detection, run kind and
-//! target, creation and end times, deleting runs, and upgrading tables written before.
+//! target, creation and end times, and deleting runs.
 
 use std::path::Path;
-use std::sync::Arc;
 
 use kv0::rt::block_on;
 use kv0::tracking::{NewRun, Repo, RepoOptions, RunStatus, StepRange, Track};
@@ -255,90 +254,6 @@ fn deleting_runs_removes_everything_recorded_for_them() {
     })
     .unwrap();
     assert_eq!(kept.len(), 10);
-}
-
-#[test]
-fn runs_tables_from_before_gain_the_new_columns() {
-    use arrow_array::builder::{ListBuilder, StringBuilder};
-    use arrow_array::{
-        BooleanArray, RecordBatch, RecordBatchIterator, StringArray, TimestampMicrosecondArray,
-        UInt64Array,
-    };
-    use arrow_schema::{DataType, Field, Schema, TimeUnit};
-
-    let (_d, uri, wal) = setup();
-    // The `runs` table as the first release wrote it, with one run.
-    let ts = DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into()));
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("seq", DataType::UInt64, false),
-        Field::new("run_id", DataType::Utf8, false),
-        Field::new("name", DataType::Utf8, true),
-        Field::new("experiment", DataType::Utf8, true),
-        Field::new("description", DataType::Utf8, true),
-        Field::new(
-            "tags",
-            DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
-            false,
-        ),
-        Field::new("status", DataType::Utf8, false),
-        Field::new("archived", DataType::Boolean, false),
-        Field::new("created_at", ts.clone(), false),
-        Field::new("updated_at", ts.clone(), false),
-        Field::new("ended_at", ts, true),
-    ]));
-    let mut tags = ListBuilder::new(StringBuilder::new());
-    tags.append(true);
-    let t = |v: Option<i64>| TimestampMicrosecondArray::from(vec![v]).with_timezone("UTC");
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(UInt64Array::from(vec![1u64])),
-            Arc::new(StringArray::from(vec!["old"])),
-            Arc::new(StringArray::from(vec![Some("legacy")])),
-            Arc::new(StringArray::from(vec![None::<&str>])),
-            Arc::new(StringArray::from(vec![None::<&str>])),
-            Arc::new(tags.finish()),
-            Arc::new(StringArray::from(vec!["finished"])),
-            Arc::new(BooleanArray::from(vec![false])),
-            Arc::new(t(Some(5))),
-            Arc::new(t(Some(6))),
-            Arc::new(t(None)),
-        ],
-    )
-    .unwrap();
-    let runs_uri = format!("{uri}/runs.lance");
-    block_on(async move {
-        let reader = RecordBatchIterator::new(vec![Ok(batch)], schema);
-        lance::Dataset::write(reader, &runs_uri, None).await
-    })
-    .unwrap();
-
-    let repo = open(&uri, &wal);
-    let old = run_info(&repo, "old");
-    assert_eq!(old.name.as_deref(), Some("legacy"));
-    assert_eq!(old.status, RunStatus::Finished);
-    assert_eq!(old.kind, None);
-    let r = repo.clone();
-    block_on(async move {
-        r.update_run("old", |i| i.kind = Some("training".into()))
-            .await
-    })
-    .unwrap();
-    repo.create_run(NewRun {
-        run_id: Some("new".into()),
-        kind: Some("eval".into()),
-        ..NewRun::default()
-    })
-    .unwrap();
-    flush(&repo);
-    let old = run_info(&repo, "old");
-    assert_eq!(old.kind.as_deref(), Some("training"));
-    assert_eq!(
-        old.name.as_deref(),
-        Some("legacy"),
-        "unset fields come from the old row"
-    );
-    assert_eq!(run_info(&repo, "new").kind.as_deref(), Some("eval"));
 }
 
 #[test]

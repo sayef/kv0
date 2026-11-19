@@ -1,12 +1,9 @@
-//! Reading Parquet data files directly, without a query engine: the Delta Lake and moraine
-//! engines both keep their rows in plain Parquet files whose paths never change, so a file can
-//! be scanned on its own and a value fetched by its row ordinal.
+//! Reading Parquet data files directly, without a query engine: moraine keeps its rows in plain
+//! Parquet files whose paths never change, so the key-value layer scans a file on its own and
+//! numbers its rows.
 
-pub(crate) mod filter;
 pub(crate) mod footer_cache;
 pub(crate) mod scan;
-#[cfg(feature = "delta")]
-pub(crate) mod take;
 
 /// Whether `e` (or one of its sources) is a missing object or file.
 pub(crate) fn not_found(e: &(dyn std::error::Error + 'static)) -> bool {

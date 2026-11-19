@@ -1,17 +1,16 @@
 //! The key-value operation log as the moraine table `ops` of a database at the location.
 //!
-//! Columns: `seq: long, op: byte, key: binary, value: binary?, vlen: integer?`, as on the
-//! Delta engine. The table has no key and no cluster key, so moraine writes the rows of an
-//! append in the order given (it sorts only by a cluster or primary key), one file per flush.
-//! Binary columns carry no statistics in moraine's log, so neither keys nor values appear
-//! there, and a cluster key on `key` would prune nothing: the view reads the log whole.
+//! Columns: `seq: long, op: byte, key: binary, value: binary?, vlen: integer?`. The table has
+//! no key and no cluster key, so moraine writes the rows of an append in the order given (it
+//! sorts only by a cluster or primary key), one file per flush. Binary columns carry no
+//! statistics in moraine's log, so neither keys nor values appear there, and a cluster key on
+//! `key` would prune nothing: the view reads the log whole.
 //!
-//! A row address is `file ordinal << 32 | row ordinal`, as on the Delta engine: file ordinals
-//! index a table of the files this handle met, which only grows and which the view snapshot
-//! saves, keyed by the table's id and the file's path; row ordinals are positions in a file.
-//! moraine's data files are plain Parquet that never change, so kv0 scans them file by file
-//! itself, numbering the rows; values are fetched by row ordinal through moraine
-//! (`TableSnapshot::take`, moraine D67).
+//! A row address is `file ordinal << 32 | row ordinal`: file ordinals index a table of the
+//! files this handle met, which only grows and which the view snapshot saves, keyed by the
+//! table's id and the file's path; row ordinals are positions in a file. moraine's data files
+//! are plain Parquet that never change, so kv0 scans them file by file itself, numbering the
+//! rows; values are fetched by row ordinal through moraine (`TableSnapshot::take`).
 //!
 //! - An append carries its writer's mark as a moraine transaction id, `kv0-wal/<writer id>`
 //!   at the writer's highest sequence number, so a replayed append lands at most once.
@@ -23,11 +22,10 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use arrow_59::array::{
-    Array, ArrayRef, AsArray, BinaryArray, Int32Array, Int64Array, Int8Array, RecordBatch,
-};
-use arrow_59::datatypes::{DataType, Field, Int64Type, Int8Type, Schema, SchemaRef};
-use arrow_array::Array as _;
+use arrow_array::cast::AsArray;
+use arrow_array::types::{Int64Type, Int8Type};
+use arrow_array::{Array, ArrayRef, BinaryArray, Int32Array, Int64Array, Int8Array, RecordBatch};
+use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use bytes::Bytes;
 use futures::future::BoxFuture;
 use futures::FutureExt;
@@ -593,11 +591,6 @@ impl OpLog for MoraineLog {
 
     fn cleanup(&self, c: crate::storage::Cleanup) -> BoxFuture<'_, Result<(u64, u64)>> {
         async move { super::erase::cleanup(&self.shared.table, c).await }.boxed()
-    }
-
-    /// kv0's cleanup cadence also brings moraine's checkpoints and vacuum (see `erase`).
-    fn needs_cleanup_cadence(&self) -> bool {
-        true
     }
 
     fn tags(&self) -> BoxFuture<'_, Result<Vec<(String, u64)>>> {

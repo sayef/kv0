@@ -1,4 +1,4 @@
-//! Values above `lazy_value_threshold` leave memory once committed and are read from Lance.
+//! Values above `lazy_value_threshold` leave memory once committed and are read from storage.
 
 use kv0::kv::{Db, Options};
 

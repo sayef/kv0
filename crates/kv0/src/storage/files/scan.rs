@@ -3,9 +3,9 @@
 
 use std::sync::Arc;
 
-use arrow_59::array::RecordBatch;
+use arrow_array::RecordBatch;
 // Parquet 59 deprecates its object-store reader in favour of implementing `AsyncFileReader`
-// directly; it is the reader delta-rs 1.1 itself uses, so kv0 keeps it until both move on.
+// directly; kv0 keeps it while it serves.
 use futures::stream::BoxStream;
 use futures::{StreamExt, TryStreamExt};
 use object_store::path::Path;

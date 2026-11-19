@@ -2,17 +2,14 @@
 
 use std::sync::Arc;
 
-use arrow_array::RecordBatch;
-use arrow_array_59::{Array as _, ArrayRef as ArrayRef59, ListArray as ListArray59};
-use arrow_schema::SchemaRef;
-use arrow_schema_59::{DataType as DataType59, Field as Field59, Schema as Schema59};
+use arrow_array::{Array as _, ArrayRef, ListArray, RecordBatch};
+use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use futures::future::BoxFuture;
 use futures::{FutureExt, StreamExt};
 
 use super::pins::Pins;
 use super::{error, wal_app_id, Repo};
 use crate::error::{Error, Result};
-use crate::storage::arrow_bridge::{from_59, to_59};
 use crate::storage::oplog::FileId;
 use crate::storage::oplog::WriterMark;
 use crate::storage::pred::{to_expr, Pred};
@@ -20,7 +17,7 @@ use crate::storage::table::{BatchStream, FileTag, Scan, Table, TableFile, TableR
 use crate::storage::types::{logical_schema, seq_to_i64};
 
 /// Opens kv0's table `name` (see [`crate::storage::table::Root::table`]), creating it when it
-/// does not exist and `create` is set. `schema` is the table as the Lance engine stores it.
+/// does not exist and `create` is set. `schema` is the table as `tracking::schema` declares it.
 pub(crate) async fn open(
     repo: &Arc<Repo>,
     name: &str,
@@ -61,16 +58,16 @@ pub(crate) async fn open(
 }
 
 /// The stored schema and options of kv0's table `name`.
-fn definition(name: &str, schema: &SchemaRef) -> Result<(Arc<Schema59>, moraine::TableOptions)> {
-    let logical = to_59(&RecordBatch::new_empty(logical_schema(schema)))?.schema();
-    let mut fields: Vec<Field59> = logical
+fn definition(name: &str, schema: &SchemaRef) -> Result<(Arc<Schema>, moraine::TableOptions)> {
+    let logical = logical_schema(schema);
+    let mut fields: Vec<Field> = logical
         .fields()
         .iter()
         .map(|f| f.as_ref().clone().with_data_type(delta_type(f.data_type())))
         .collect();
     let cluster: &[&str] = if name == "metrics" {
         // Points carry their run, so a run's series sit together and a run deletes alone.
-        fields.insert(0, Field59::new("run_id", DataType59::Utf8, false));
+        fields.insert(0, Field::new("run_id", DataType::Utf8, false));
         &["run_id", "series_id"]
     } else if name.starts_with("records/") {
         &["run_id", "item_id"]
@@ -80,7 +77,7 @@ fn definition(name: &str, schema: &SchemaRef) -> Result<(Arc<Schema59>, moraine:
         &[]
     };
     Ok((
-        Arc::new(Schema59::new(fields)),
+        Arc::new(Schema::new(fields)),
         moraine::TableOptions {
             cluster_by: cluster.iter().map(|c| c.to_string()).collect(),
             ..Default::default()
@@ -89,10 +86,10 @@ fn definition(name: &str, schema: &SchemaRef) -> Result<(Arc<Schema59>, moraine:
 }
 
 /// `t` as moraine stores it: Delta Lake names a list's item field `element`.
-fn delta_type(t: &DataType59) -> DataType59 {
+fn delta_type(t: &DataType) -> DataType {
     match t {
-        DataType59::List(item) => DataType59::List(Arc::new(
-            Field59::new("element", delta_type(item.data_type()), item.is_nullable())
+        DataType::List(item) => DataType::List(Arc::new(
+            Field::new("element", delta_type(item.data_type()), item.is_nullable())
                 .with_metadata(item.metadata().clone()),
         )),
         other => other.clone(),
@@ -100,16 +97,16 @@ fn delta_type(t: &DataType59) -> DataType59 {
 }
 
 /// `a` with the type `to`, where the two differ only in a list's item field name.
-fn renamed(a: &ArrayRef59, to: &DataType59) -> Result<ArrayRef59> {
+fn renamed(a: &ArrayRef, to: &DataType) -> Result<ArrayRef> {
     match (a.data_type(), to) {
-        (DataType59::List(_), DataType59::List(field)) => {
+        (DataType::List(_), DataType::List(field)) => {
             let list = a
                 .as_any()
-                .downcast_ref::<ListArray59>()
+                .downcast_ref::<ListArray>()
                 .ok_or_else(|| Error::Corruption("a list column is not a list".into()))?;
             let (_, offsets, values, nulls) = list.clone().into_parts();
             let values = renamed(&values, field.data_type())?;
-            Ok(Arc::new(ListArray59::try_new(
+            Ok(Arc::new(ListArray::try_new(
                 field.clone(),
                 offsets,
                 values,
@@ -122,8 +119,7 @@ fn renamed(a: &ArrayRef59, to: &DataType59) -> Result<ArrayRef59> {
 
 /// `batch` (kv0's logical columns) as moraine takes it for a table of schema `schema`: list
 /// columns with the item field named as the table names it.
-fn stored(schema: &Schema59, batch: &RecordBatch) -> Result<arrow_array_59::RecordBatch> {
-    let b = to_59(batch)?;
+fn stored(schema: &Schema, b: &RecordBatch) -> Result<RecordBatch> {
     let mut fields = Vec::with_capacity(b.num_columns());
     let mut cols = Vec::with_capacity(b.num_columns());
     for (f, c) in b.schema().fields().iter().zip(b.columns()) {
@@ -138,10 +134,7 @@ fn stored(schema: &Schema59, batch: &RecordBatch) -> Result<arrow_array_59::Reco
             }
         }
     }
-    Ok(arrow_array_59::RecordBatch::try_new(
-        Arc::new(Schema59::new(fields)),
-        cols,
-    )?)
+    Ok(RecordBatch::try_new(Arc::new(Schema::new(fields)), cols)?)
 }
 
 /// A table version: the moraine table and the snapshot this handle reads.
@@ -164,7 +157,7 @@ fn merge_policy() -> moraine::CompactionPolicy {
 
 impl MoraineTable {
     /// `batch` (kv0's logical columns) as moraine takes it for this table.
-    fn to_stored(&self, batch: &RecordBatch) -> Result<arrow_array_59::RecordBatch> {
+    fn to_stored(&self, batch: &RecordBatch) -> Result<RecordBatch> {
         stored(&self.snap.schema(), batch)
     }
 
@@ -225,7 +218,7 @@ impl MoraineTable {
 
     async fn read(&self, scan: Scan) -> Result<Vec<RecordBatch>> {
         let batches = self.moraine_scan(&scan).collect().await.map_err(error)?;
-        batches.iter().map(from_59).collect()
+        Ok(batches)
     }
 }
 
@@ -284,7 +277,7 @@ impl Table for MoraineTable {
     fn scan_stream(&self, scan: Scan) -> BoxFuture<'_, Result<BatchStream>> {
         async move {
             let s = self.moraine_scan(&scan).stream();
-            Ok(s.map(|b| from_59(&b.map_err(error)?)).boxed())
+            Ok(s.map(|b| b.map_err(error)).boxed())
         }
         .boxed()
     }
@@ -339,10 +332,6 @@ impl Table for MoraineTable {
         .boxed()
     }
 
-    fn keeps_marks(&self) -> bool {
-        true
-    }
-
     fn writer_mark<'a>(&'a self, writer: &'a str) -> BoxFuture<'a, Result<Option<u64>>> {
         async move {
             Ok(self
@@ -355,7 +344,7 @@ impl Table for MoraineTable {
 
     fn add_columns(&mut self, added: SchemaRef) -> BoxFuture<'_, Result<()>> {
         async move {
-            let added = to_59(&RecordBatch::new_empty(logical_schema(&added)))?.schema();
+            let added = logical_schema(&added);
             for f in added.fields() {
                 let f = f.as_ref().clone().with_data_type(delta_type(f.data_type()));
                 self.table.add_column(f).await.map_err(error)?;
@@ -370,8 +359,7 @@ impl Table for MoraineTable {
         async move {
             self.refresh().await?;
             let e = self.expr(&pred);
-            // Copy-on-write: the files holding matching rows are rewritten at once (moraine
-            // D27), so nothing is left for `compact_removed`.
+            // Copy-on-write: the files holding matching rows are rewritten at once.
             self.table.delete(e).await.map_err(error)?;
             self.after_commit();
             Ok(())
@@ -422,7 +410,7 @@ impl Table for MoraineTable {
             let mut r = moraine::Replace::new()
                 .remove_all(remove.into_iter().map(|f| f.0))
                 .add_stream(rows);
-            // moraine keeps tags per file: the files kept (`tag.keep`) carry theirs already.
+            // moraine keeps tags per file: the files kept carry theirs already.
             if let Some(t) = &tag {
                 r = r.tag(t.key, "1");
             }
@@ -454,24 +442,8 @@ impl Table for MoraineTable {
         }
     }
 
-    fn compact_removed(&mut self) -> BoxFuture<'_, Result<usize>> {
-        // Deletes rewrite files at once (copy-on-write).
-        async move { Ok(0) }.boxed()
-    }
-
-    /// No lookup indexes yet: moraine's key-index sidecar is not configured by kv0; files are
-    /// sorted by the cluster key and pruned by statistics, bloom filters and the page index.
-    fn index<'a>(&'a mut self, _columns: &'a [&'static str]) -> BoxFuture<'a, Result<()>> {
-        async move { Ok(()) }.boxed()
-    }
-
     fn cleanup(&self, c: crate::storage::Cleanup) -> BoxFuture<'_, Result<(u64, u64)>> {
         async move { super::erase::cleanup(&self.table, c).await }.boxed()
-    }
-
-    /// kv0's cleanup cadence also brings moraine's checkpoints and vacuum (see `erase`).
-    fn needs_cleanup_cadence(&self) -> bool {
-        true
     }
 
     fn maintain(&mut self) -> BoxFuture<'_, Result<()>> {

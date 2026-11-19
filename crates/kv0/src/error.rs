@@ -21,7 +21,7 @@ pub enum Error {
     Conflict(String),
     /// Object store or file system failure.
     Io(String),
-    /// Any other error reported by Lance or Arrow.
+    /// Any other error reported by moraine, Arrow or Parquet.
     Storage(Box<dyn std::error::Error + Send + Sync>),
 }
 
@@ -48,27 +48,6 @@ impl std::error::Error for Error {
     }
 }
 
-impl From<lance::Error> for Error {
-    fn from(e: lance::Error) -> Self {
-        use lance::Error as L;
-        // A missing object anywhere in the error's sources (an object store's or the file
-        // system's not-found, wrapped in an I/O error) is reported as `NotFound`.
-        if e.is_not_found() {
-            return Error::NotFound(e.to_string());
-        }
-        match e {
-            L::DatasetNotFound { .. } | L::NotFound { .. } => Error::NotFound(e.to_string()),
-            L::CorruptFile { .. } => Error::Corruption(e.to_string()),
-            L::CommitConflict { .. }
-            | L::IncompatibleTransaction { .. }
-            | L::RetryableCommitConflict { .. }
-            | L::TooMuchWriteContention { .. } => Error::Conflict(e.to_string()),
-            L::IO { .. } => Error::Io(e.to_string()),
-            other => Error::Storage(Box::new(other)),
-        }
-    }
-}
-
 impl From<arrow_schema::ArrowError> for Error {
     fn from(e: arrow_schema::ArrowError) -> Self {
         Error::Storage(Box::new(e))
@@ -81,30 +60,6 @@ impl From<serde_json::Error> for Error {
     }
 }
 
-#[cfg(feature = "delta")]
-impl From<deltalake_core::DeltaTableError> for Error {
-    fn from(e: deltalake_core::DeltaTableError) -> Self {
-        use deltalake_core::kernel::transaction::TransactionError as T;
-        use deltalake_core::DeltaTableError as D;
-        if crate::storage::delta::not_found(&e) {
-            return Error::NotFound(e.to_string());
-        }
-        match e {
-            D::NotATable(_) => Error::NotFound(e.to_string()),
-            D::InvalidJsonLog { .. } | D::InvalidStatsJson { .. } | D::InvalidData { .. } => {
-                Error::Corruption(e.to_string())
-            }
-            D::Transaction {
-                source: T::CommitConflict(_) | T::MaxCommitAttempts(_) | T::VersionAlreadyExists(_),
-            }
-            | D::VersionAlreadyExists(_) => Error::Conflict(e.to_string()),
-            D::Io { .. } => Error::Io(e.to_string()),
-            other => Error::Storage(Box::new(other)),
-        }
-    }
-}
-
-#[cfg(any(feature = "delta", feature = "moraine"))]
 impl From<parquet::errors::ParquetError> for Error {
     fn from(e: parquet::errors::ParquetError) -> Self {
         if crate::storage::files::not_found(&e) {
@@ -115,7 +70,6 @@ impl From<parquet::errors::ParquetError> for Error {
     }
 }
 
-#[cfg(any(feature = "delta", feature = "moraine"))]
 impl From<object_store::Error> for Error {
     fn from(e: object_store::Error) -> Self {
         if crate::storage::files::not_found(&e) {
@@ -123,13 +77,5 @@ impl From<object_store::Error> for Error {
         } else {
             Error::Io(e.to_string())
         }
-    }
-}
-
-/// Arrow 59's error (the Delta Lake and moraine engines).
-#[cfg(any(feature = "delta", feature = "moraine"))]
-impl From<arrow_schema_59::ArrowError> for Error {
-    fn from(e: arrow_schema_59::ArrowError) -> Self {
-        Error::Storage(Box::new(e))
     }
 }

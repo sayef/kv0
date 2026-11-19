@@ -1,29 +1,22 @@
-//! Locations, object-store options and the storage engines behind them.
+//! Locations, object-store options and the storage engine behind them.
 //!
-//! A location is anything Lance accepts: a local path, `file://`, `memory://`, `s3://`, `gs://`,
-//! `az://` and so on. Credentials and endpoints are passed through to Lance's object store as
-//! string options (for example `aws_endpoint`, `aws_region`, `allow_http`), and fall back to the
-//! usual environment variables (`AWS_*`, `GOOGLE_*`, `AZURE_*`).
+//! A location is a local path, `file://`, `memory://` or `s3://` (including S3-compatible
+//! servers). Credentials and endpoints are passed to the object store as string options (for
+//! example `aws_endpoint`, `aws_region`, `allow_http`), and fall back to the usual `AWS_*`
+//! environment variables. Google Cloud Storage and Azure Blob Storage are not supported yet.
 //!
 //! The key-value layer reaches storage only through [`oplog::OpLog`], the tracking layer only
 //! through [`table::Table`] with [`pred::Pred`] filters (a repository's tables through
-//! [`table::Root`]); [`lance`] implements both, and so does `delta` with the `delta` feature.
+//! [`table::Root`]); [`moraine`] implements both, as a thin adapter over the `morainedb` crate.
 
 use std::collections::HashMap;
 use std::path::Path;
 
 use crate::error::{Error, Result};
 
-pub(crate) mod arrow_bridge;
-#[cfg(feature = "delta")]
-pub(crate) mod delta;
-#[cfg(any(feature = "delta", feature = "moraine"))]
 pub(crate) mod faults;
-#[cfg(any(feature = "delta", feature = "moraine"))]
 pub(crate) mod files;
 pub mod format;
-pub(crate) mod lance;
-#[cfg(feature = "moraine")]
 pub(crate) mod moraine;
 pub(crate) mod oplog;
 pub(crate) mod pred;
@@ -31,9 +24,8 @@ pub(crate) mod table;
 pub(crate) mod types;
 
 pub use self::format::{detect, Engine, Format};
-pub(crate) use self::lance::{list_dir, remove_dir};
 
-/// Object-store options passed through to Lance, such as `aws_endpoint` or `aws_region`.
+/// Object-store options, such as `aws_endpoint` or `aws_region`.
 pub type StorageOptions = HashMap<String, String>;
 
 /// Normalises a location: URIs pass through unchanged, local paths become absolute.
@@ -77,38 +69,27 @@ pub(crate) fn non_empty(options: &StorageOptions) -> StorageOptions {
 
 /// What a version cleanup removes.
 #[derive(Clone, Copy, Debug)]
-// Lance reads only `before`.
-#[cfg_attr(not(feature = "delta"), allow(dead_code))]
 pub(crate) struct Cleanup {
-    /// Versions committed before this are removed; the latest and tagged versions stay.
+    /// Data files removed by commits before this go now; the latest and tagged versions stay.
     pub before: chrono::DateTime<chrono::Utc>,
-    /// Files that no version references are removed only once they are older than this: a
-    /// writer may still be about to commit them. Engines that track every file they write
-    /// (Lance) ignore it.
-    pub orphan_grace: std::time::Duration,
-    /// Erasure (purge): also remove every file a removed version referenced, however recently
-    /// it was written or dropped.
+    /// Erasure (purge): also take the statistics of the removed files out of the log.
     pub erase: bool,
 }
 
 impl Cleanup {
-    /// Removes versions committed before `before`.
-    pub(crate) fn before(
-        before: chrono::DateTime<chrono::Utc>,
-        orphan_grace: std::time::Duration,
-    ) -> Cleanup {
+    /// Removes the data of versions committed before `before`.
+    pub(crate) fn before(before: chrono::DateTime<chrono::Utc>) -> Cleanup {
         Cleanup {
             before,
-            orphan_grace,
             erase: false,
         }
     }
 
-    /// Removes every version but the latest and tagged ones, and the data only they hold.
-    pub(crate) fn erase(orphan_grace: std::time::Duration) -> Cleanup {
+    /// Removes the data of every version but the latest and tagged ones, and erases it from the
+    /// log.
+    pub(crate) fn erase() -> Cleanup {
         Cleanup {
             before: chrono::Utc::now() + chrono::Duration::seconds(1),
-            orphan_grace,
             erase: true,
         }
     }

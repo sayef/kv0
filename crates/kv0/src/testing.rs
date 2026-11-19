@@ -1,7 +1,7 @@
 //! Hooks for kv0's own concurrency and crash tests. Not part of the supported API: anything
 //! here may change in any release.
 //!
-//! [`set_faults`] makes the object stores of Delta Lake and moraine tables fail, delay or lose the
+//! [`set_faults`] makes the object stores of moraine databases fail, delay or lose the
 //! responses of operations at seeded random points, or end the process at a chosen write, as a
 //! crash would. Tables opened before faults are first configured in a process are not affected.
 
@@ -53,8 +53,7 @@ pub struct Stall {
     pub millis: u64,
 }
 
-/// Faults injected into every Delta Lake table and moraine repository opened afterwards in this
-/// process.
+/// Faults injected into every moraine database opened afterwards in this process.
 #[derive(Clone, Debug, Default)]
 pub struct Faults {
     /// Seeds the random choice of operations and kinds; print it to reproduce a run.
@@ -95,7 +94,6 @@ pub fn faults_injected() -> u64 {
 /// Whether a file under the local directory `dir` holds `needle`: in its raw bytes, or, for a
 /// Parquet file (compressed, so a byte search misses), in any string or binary value once
 /// decoded. Erasure tests use it to show that deleted data is gone.
-#[cfg(any(feature = "delta", feature = "moraine"))]
 pub fn stored_anywhere(dir: &std::path::Path, needle: &[u8]) -> bool {
     let Ok(rd) = std::fs::read_dir(dir) else {
         return false;
@@ -110,7 +108,6 @@ pub fn stored_anywhere(dir: &std::path::Path, needle: &[u8]) -> bool {
 }
 
 /// [`stored_anywhere`] for one file.
-#[cfg(any(feature = "delta", feature = "moraine"))]
 pub fn file_holds(p: &std::path::Path, needle: &[u8]) -> bool {
     let Ok(bytes) = std::fs::read(p) else {
         return false;
@@ -121,7 +118,6 @@ pub fn file_holds(p: &std::path::Path, needle: &[u8]) -> bool {
     p.extension().is_some_and(|x| x == "parquet") && parquet_holds(bytes, needle)
 }
 
-#[cfg(any(feature = "delta", feature = "moraine"))]
 fn parquet_holds(bytes: Vec<u8>, needle: &[u8]) -> bool {
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
     let Ok(reader) =
@@ -137,13 +133,13 @@ fn parquet_holds(bytes: Vec<u8>, needle: &[u8]) -> bool {
     })
 }
 
-#[cfg(any(feature = "delta", feature = "moraine"))]
-fn array_holds(a: &dyn arrow_59::array::Array, needle: &[u8]) -> bool {
-    use arrow_59::array::{
+fn array_holds(a: &dyn arrow_array::Array, needle: &[u8]) -> bool {
+    use arrow_array::types::Int32Type;
+    use arrow_array::{
         BinaryArray, DictionaryArray, LargeBinaryArray, LargeListArray, LargeStringArray,
         ListArray, MapArray, StringArray, StructArray,
     };
-    use arrow_59::datatypes::{DataType, Int32Type};
+    use arrow_schema::DataType;
     let has = |v: &[u8]| v.windows(needle.len()).any(|w| w == needle);
     let any = a.as_any();
     match a.data_type() {

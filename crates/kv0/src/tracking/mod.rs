@@ -1,7 +1,7 @@
 //! Typed, columnar tables for an experiment tracker: runs, parameters and metric series.
 //!
-//! A [`Repo`] is a location holding four Lance datasets: `runs`, `params`, `series` and
-//! `metrics`. Writes are buffered per [`Repo`] handle and appended in batches (one commit per
+//! A [`Repo`] is a location holding one moraine database with four tables: `runs`, `params`,
+//! `series` and `metrics` (and one per records table). Writes are buffered per [`Repo`] handle and appended in batches (one commit per
 //! table per flush), on [`Repo::flush`], when [`RepoOptions::flush_rows`] points are buffered,
 //! every [`RepoOptions::flush_interval`] and on close. Queries flush this handle's buffer first
 //! and read the latest committed version, so they include this handle's writes and every other
@@ -93,7 +93,7 @@ macro_rules! replan {
 pub struct RepoOptions {
     /// Create the tables when they do not exist. Default `true`.
     pub create_if_missing: bool,
-    /// Object-store options passed to Lance.
+    /// Object-store options, such as `aws_endpoint` or `aws_region`.
     pub storage_options: StorageOptions,
     /// Flush once this many metric points are buffered. Default 50 000.
     pub flush_rows: usize,
@@ -106,41 +106,38 @@ pub struct RepoOptions {
     pub wal_sync: WalSync,
     /// WAL root directory; `None` uses `KV0_WAL_DIR`, else the platform cache directory.
     pub wal_dir: Option<std::path::PathBuf>,
-    /// Compact a table automatically after a flush once it has more than this many fragments
+    /// Compact a table automatically after a flush once it has more than this many small files
     /// (each flush adds one per table it writes). `0` disables. Default 32.
     pub max_fragments: usize,
-    /// Fragments with at least this many rows count as settled: they never trigger automatic
-    /// compaction, and compaction aims for this size. Default 1 000 000 (Lance's default).
+    /// Files with at least this many rows count as settled: they never trigger automatic
+    /// compaction. moraine's compaction aims for its own target file size. Default 1 000 000.
     pub compaction_target_rows: usize,
-    /// How often background maintenance prunes WAL mark rows (a filtered scan of every table).
-    /// `optimize` always prunes. Default 1 h.
+    /// Accepted and ignored: writer marks are moraine transaction ids, which need no pruning.
     pub mark_prune_interval: Duration,
-    /// How long `optimize` keeps a writer's WAL mark rows (see the key-value layer's
-    /// `mark_ttl`). Default 30 days.
+    /// How long tombstones of deleted runs are kept, and the age past which a write-ahead log
+    /// whose writer never committed is refused without `replay_stale_wal`. Default 30 days.
     pub mark_ttl: Duration,
     /// Replay a WAL older than `mark_ttl` whose writer has no marks left (its writes may be
     /// stored twice). Default `false`: such a WAL fails the open.
     pub replay_stale_wal: bool,
-    /// Delete versions older than this automatically. Lance tables take it when created (Lance
-    /// runs the cleanup every 20 commits); Delta Lake tables take it from each writing handle,
-    /// whose background maintenance runs the cleanup every 20 flushes. `None` keeps every
-    /// version. Default 7 days.
+    /// Delete the data of versions older than this automatically: each writing handle's
+    /// background maintenance runs the cleanup every 20 flushes. `None` keeps every version's
+    /// data until moraine's vacuum takes it. Default 7 days.
     pub version_retention: Option<Duration>,
-    /// Version cleanup and purge delete data files that no version references (left by a
-    /// writer that crashed before committing) only once they are older than this (see the
-    /// key-value layer's `orphan_grace`). Default 1 h.
+    /// Accepted and ignored: data files that no version references (left by a writer that
+    /// crashed before committing) are deleted by moraine's vacuum after its grace period.
     pub orphan_grace: Duration,
-    /// What to do when the repository still has the shared `records.lance` of builds before
-    /// per-table records. Default [`LegacyRecords::Error`].
+    /// Accepted and ignored: only Lance repositories of earlier builds held the shared records
+    /// table this option was about, and this kv0 does not open them.
     pub legacy_records: LegacyRecords,
-    /// The storage engine of a repository created here. An existing repository always opens
-    /// with the engine it was written in; naming another one fails (a Lance repository asked
-    /// to open with Delta Lake points to `kv0 migrate`). `None` uses `KV0_ENGINE` (`lance` or
-    /// `delta`), else Lance. Default `None`.
+    /// The storage engine of a repository created here: moraine, the only one (`None` uses
+    /// `KV0_ENGINE`, else moraine). Naming an engine of an earlier release, or opening a
+    /// repository written with one, fails with [`Error::NotSupported`]. Default `None`.
     pub engine: Option<crate::storage::Engine>,
 }
 
-/// Handling of the shared `records.lance` that builds before per-table records wrote.
+/// Handling of the shared records table that builds before per-table records wrote (in Lance
+/// repositories, which this kv0 does not open); kept for compatibility, ignored.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum LegacyRecords {
     /// Opening fails with a message saying how to migrate.
@@ -499,8 +496,6 @@ struct Core {
     maintaining: AtomicBool,
     /// Tables compacted by background maintenance (diagnostics).
     compactions: AtomicU64,
-    /// When marks were last pruned; `None` until the first maintenance after open.
-    last_prune: parking_lot::Mutex<Option<Instant>>,
     /// Woken when background maintenance ends, for `close` and tests.
     maintained: tokio::sync::Notify,
     /// Test hook: the next maintenance panics.
@@ -540,14 +535,7 @@ async fn open_table(
     schema: SchemaRef,
     opts: &RepoOptions,
 ) -> Result<TableRef> {
-    root.table(
-        name,
-        schema,
-        opts.create_if_missing,
-        opts.version_retention,
-        opts.mark_ttl,
-    )
-    .await
+    root.table(name, schema, opts.create_if_missing).await
 }
 
 /// Adds the columns `runs` gained after its first release (as nulls, a metadata-only commit),
@@ -849,22 +837,14 @@ fn read_series_rows(batches: &[RecordBatch]) -> Result<Vec<SeriesInfo>> {
 /// run deleted elsewhere for up to this long (plus one flush); reads always check.
 const TOMBSTONE_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 
-/// Run id prefix of the WAL mark rows in `runs`, `params` and `series`.
-pub(crate) const MARK_PREFIX: &str = "__kv0_wal__/";
-
-pub(crate) fn writer_hash(writer: &str) -> i64 {
-    xxhash_rust::xxh3::xxh3_64(writer.as_bytes()) as i64
-}
-
 /// Appends each non-empty buffer as one commit, clearing what was written. Series are written
 /// before their points, so a reader never sees points of a series it cannot name.
 ///
-/// With a WAL writer, each table's commit also holds a mark: the writer has committed every
-/// write of that table's kind up to sequence number `upto`. An engine that keeps marks itself
-/// commits it with the rows ([`tbl::Table::keeps_marks`]); otherwise it is a mark row.
+/// With a WAL writer, each table's commit also holds a mark, a moraine transaction id: the
+/// writer has committed every write of that table's kind up to sequence number `upto`.
 ///
-/// Where `metrics` has a `run_id` column (the moraine engine), points and statistics rows carry
-/// the run of their series, from `run_of` (empty when unknown).
+/// Points and statistics rows carry the run of their series in `metrics`, from `run_of` (empty
+/// when unknown).
 async fn write_all(
     t: &mut Tables,
     left: &mut Buffers,
@@ -872,69 +852,30 @@ async fn write_all(
     deltas: &[(u64, stats::Delta)],
     run_of: &HashMap<u64, String>,
 ) -> Result<()> {
-    let engine_mark = mark.map(|(w, upto)| WriterMark {
+    let mark = mark.map(|(w, upto)| WriterMark {
         writer: w.to_string(),
         seq: upto,
     });
-    // Mark rows only where the engine does not keep marks.
-    let row_mark = mark.filter(|_| !t.runs.keeps_marks());
-    let mark_id = row_mark.map(|(w, _)| format!("{MARK_PREFIX}{w}"));
     if !left.runs.is_empty() {
-        let mut rows = left.runs.clone();
-        if let (Some(id), Some((_, upto))) = (&mark_id, row_mark) {
-            let now = now_micros();
-            rows.push((
-                upto,
-                RunInfo {
-                    run_id: id.clone(),
-                    name: None,
-                    experiment: None,
-                    description: None,
-                    tags: Vec::new(),
-                    status: RunStatus::Running,
-                    archived: true,
-                    created_at: now,
-                    updated_at: now,
-                    ended_at: None,
-                    kind: None,
-                    target: None,
-                },
-                fields::ALL,
-            ));
-        }
         t.runs
-            .append(vec![runs_batch(&rows)?], engine_mark.clone())
+            .append(vec![runs_batch(&left.runs)?], mark.clone())
             .await?;
         left.runs.clear();
     }
     if !left.params.is_empty() {
-        let mut rows = left.params.clone();
-        if let (Some(id), Some((_, upto))) = (&mark_id, row_mark) {
-            rows.push((upto, id.clone(), String::new(), Value::Null));
-        }
         t.params
-            .append(vec![params_batch(&rows)?], engine_mark.clone())
+            .append(vec![params_batch(&left.params)?], mark.clone())
             .await?;
         left.params.clear();
     }
     if !left.series.is_empty() {
-        let mut rows = left.series.clone();
-        if let (Some(id), Some((_, upto))) = (&mark_id, row_mark) {
-            rows.push(SeriesInfo {
-                series_id: 0,
-                run_id: id.clone(),
-                name: upto.to_string(),
-                context: Value::Object(Default::default()),
-                created_at: now_micros(),
-            });
-        }
         t.series
-            .append(vec![series_batch(&rows)?], engine_mark.clone())
+            .append(vec![series_batch(&left.series)?], mark.clone())
             .await?;
         left.series.clear();
     }
     if !left.series_ids.is_empty() || !deltas.is_empty() {
-        let mut pts = Buffers {
+        let pts = Buffers {
             series_ids: left.series_ids.clone(),
             steps: left.steps.clone(),
             epochs: left.epochs.clone(),
@@ -942,25 +883,16 @@ async fn write_all(
             values: left.values.clone(),
             ..Default::default()
         };
-        if let Some((w, upto)) = row_mark {
-            pts.series_ids.push(0);
-            pts.steps.push(upto as i64);
-            pts.epochs.push(Some(writer_hash(w)));
-            pts.timestamps.push(now_micros());
-            pts.values.push(0.0);
-        }
         // The statistics of these points in the same commit: atomic with them, no extra commit.
         let mut batches = vec![metrics_batch(&pts)?];
         if !deltas.is_empty() {
             batches.push(deltas_batch(deltas)?);
         }
-        if t.metrics.has_column("run_id") {
-            batches = batches
-                .iter()
-                .map(|b| with_runs(b, run_of))
-                .collect::<Result<_>>()?;
-        }
-        t.metrics.append(batches, engine_mark).await?;
+        let batches = batches
+            .iter()
+            .map(|b| with_runs(b, run_of))
+            .collect::<Result<_>>()?;
+        t.metrics.append(batches, mark).await?;
         left.relogged.clear();
         left.series_ids.clear();
         left.steps.clear();
@@ -974,54 +906,21 @@ async fn write_all(
 /// Per-table WAL marks of `writer`: the highest committed sequence number of runs, params,
 /// series and metric points.
 async fn marks_of(t: &Tables, writer: &str) -> Result<[u64; 4]> {
-    if t.runs.keeps_marks() {
-        let mut out = [0; 4];
-        for (i, ds) in [&t.runs, &t.params, &t.series, &t.metrics]
-            .into_iter()
-            .enumerate()
-        {
-            out[i] = ds.writer_mark(writer).await?.unwrap_or(0);
-        }
-        return Ok(out);
+    let mut out = [0; 4];
+    for (i, ds) in [&t.runs, &t.params, &t.series, &t.metrics]
+        .into_iter()
+        .enumerate()
+    {
+        out[i] = ds.writer_mark(writer).await?.unwrap_or(0);
     }
-    let id = format!("{MARK_PREFIX}{writer}");
-    let max_seq = |batches: Vec<RecordBatch>| -> Result<u64> {
-        let mut m = 0;
-        for b in &batches {
-            let seq = col::<Int64Array>(b, "seq")?;
-            m = seq
-                .values()
-                .iter()
-                .map(|s| seq_from_i64(*s))
-                .fold(m, u64::max);
-        }
-        Ok(m)
-    };
-    let runs = max_seq(scan(&t.runs, Some(Pred::eq("run_id", &id))).await?)?;
-    let params = max_seq(scan(&t.params, Some(Pred::eq("run_id", &id))).await?)?;
-    let mut series = 0;
-    for b in scan(&t.series, Some(Pred::eq("run_id", &id))).await? {
-        let name = col::<StringArray>(&b, "name")?;
-        for v in name.iter().flatten() {
-            series = series.max(v.parse().unwrap_or(0));
-        }
-    }
-    let mut points = 0;
-    let filter = Pred::eq("series_id", 0i64).and(Pred::eq("epoch", writer_hash(writer)));
-    for b in scan(&t.metrics, Some(filter)).await? {
-        let step = col::<Int64Array>(&b, "step")?;
-        for v in step.values() {
-            points = points.max(*v as u64);
-        }
-    }
-    Ok([runs, params, series, points])
+    Ok(out)
 }
 
 impl Core {
     /// Background maintenance after a flush: compacts tables with more than `max_fragments`
-    /// small fragments, and prunes mark rows once per `mark_prune_interval`. Works on clones of
-    /// the tables without holding the `tables` lock; Lance lets these commits land alongside
-    /// appends. Returns the number of tables compacted.
+    /// small files, and runs version cleanup every few commits. Works on clones of the tables
+    /// without holding the `tables` lock; moraine lets these commits land alongside appends.
+    /// Returns the number of tables compacted.
     async fn maintain(&self) -> Result<usize> {
         if self.panic_next_maintenance.swap(false, Ordering::AcqRel) {
             panic!("kv0: injected maintenance panic");
@@ -1036,17 +935,6 @@ impl Core {
                 metrics: t.metrics.clone(),
             }
         };
-        let due = {
-            let mut last = self.last_prune.lock();
-            let due = last.is_none_or(|at| at.elapsed() >= o.mark_prune_interval);
-            if due {
-                *last = Some(Instant::now());
-            }
-            due
-        };
-        if due {
-            prune_marks(&mut t, o.mark_ttl).await?;
-        }
         // The records tables opened so far: clones, so appends keep going.
         let mut extra: Vec<TableRef> = self.records.lock().await.values().cloned().collect();
         if self.cleanup_due() {
@@ -1094,8 +982,8 @@ impl Core {
         else {
             return;
         };
-        let c = storage::Cleanup::before(chrono::Utc::now() - age, self.opts.orphan_grace);
-        for t in tables.filter(|t| t.needs_cleanup_cadence()) {
+        let c = storage::Cleanup::before(chrono::Utc::now() - age);
+        for t in tables {
             match t.cleanup(c).await {
                 Ok((versions, bytes)) => {
                     tracing::debug!(uri = %self.uri, versions, bytes, "kv0: cleaned up old versions");
@@ -1204,16 +1092,14 @@ fn fold_run_rows(mut rows: Vec<(u64, RunInfo, u32)>) -> Vec<(u64, RunInfo, u32)>
 const FIELD_COUNT: usize = 10;
 
 /// Rewrites `runs` with the fewest rows per run that merge the same (see [`fold_run_rows`]),
-/// keeping tombstones and WAL mark rows as they are, in one commit that keeps rows
+/// keeping tombstones as they are, in one commit that keeps rows
 /// appended meanwhile. A run that changes often (a heartbeat every few seconds) otherwise
 /// leaves thousands of rows that every read of the runs merges again. Returns the rows dropped.
 async fn fold_runs(t: &mut TableRef) -> Result<usize> {
     let files: Vec<FileId> = t.files().into_iter().map(|f| f.id).collect();
     let rows = read_runs(&t.scan(Scan::all().files(files.clone())).await?)?;
     let before = rows.len();
-    let (kept, runs): (Vec<_>, Vec<_>) = rows
-        .into_iter()
-        .partition(|r| r.2 == fields::DELETED || r.1.run_id.starts_with(MARK_PREFIX));
+    let (kept, runs): (Vec<_>, Vec<_>) = rows.into_iter().partition(|r| r.2 == fields::DELETED);
     let dead: HashSet<&str> = kept
         .iter()
         .filter(|r| r.2 == fields::DELETED)
@@ -1313,10 +1199,10 @@ async fn sort_metrics(t: &mut TableRef, live: Arc<HashSet<u64>>) -> Result<bool>
         }
         overlap
     };
-    let (keep, rewrite): (Vec<_>, Vec<_>) = if full {
-        (Vec::new(), old.into_iter().chain(new).collect())
+    let rewrite: Vec<_> = if full {
+        old.into_iter().chain(new).collect()
     } else {
-        (old, new)
+        new
     };
     let removed = ids(&rewrite);
     let rows: usize = rewrite.iter().map(|f| f.rows).sum();
@@ -1340,7 +1226,7 @@ async fn sort_metrics(t: &mut TableRef, live: Arc<HashSet<u64>>) -> Result<bool>
                 // One bucket at a time is the memory bound; keep the read-ahead small too.
                 let scan = Scan::filter(filter).files(files.to_vec()).bounded();
                 let batches = src.scan(scan).await?;
-                // Engines that store each point's run (moraine) get it back on the new rows.
+                // Each point's run comes back on the new rows.
                 let run_of = runs_of_points(&batches)?;
                 let out = sorted_points(batches, &live)?;
                 if run_of.is_empty() {
@@ -1354,10 +1240,7 @@ async fn sort_metrics(t: &mut TableRef, live: Arc<HashSet<u64>>) -> Result<bool>
         .try_flatten()
         .boxed();
     // The rewritten files are sorted, and so are the ones kept.
-    let tag = FileTag {
-        key: SORTED_TAG,
-        keep: keep.into_iter().map(|f| f.id).collect(),
-    };
+    let tag = FileTag { key: SORTED_TAG };
     t.replace(removed, schema::METRICS_LOGICAL.clone(), stream, Some(tag))
         .await?;
     Ok(true)
@@ -1483,104 +1366,6 @@ async fn exact_from_points(
         out.extend(stats::exact(&i, &st, &v, &ts));
     }
     Ok(out)
-}
-
-/// Deletes WAL mark rows that are no longer needed: all but each writer's newest, and every
-/// mark older than `ttl`. One delete per table, only when there is something to delete.
-async fn prune_marks(t: &mut Tables, ttl: Duration) -> Result<()> {
-    if t.runs.keeps_marks() {
-        return Ok(()); // the engine expires them
-    }
-    let cutoff = now_nanos().saturating_sub(ttl.as_nanos() as u64);
-    let like = Pred::StartsWith("run_id", MARK_PREFIX.to_string());
-    // runs and params carry the sequence number in `seq`.
-    for ds in [&mut t.runs, &mut t.params] {
-        ds.latest().await?;
-        let mut best: HashMap<String, (u64, usize)> = HashMap::new();
-        for b in scan(ds, Some(like.clone())).await? {
-            let id = col::<StringArray>(&b, "run_id")?;
-            let seq = col::<Int64Array>(&b, "seq")?;
-            for i in 0..b.num_rows() {
-                if id.value(i).starts_with(MARK_PREFIX) {
-                    let e = best.entry(id.value(i).to_string()).or_insert((0, 0));
-                    e.0 = e.0.max(seq_from_i64(seq.value(i)));
-                    e.1 += 1;
-                }
-            }
-        }
-        let preds: Vec<Pred> = best
-            .iter()
-            .filter(|(_, (max, n))| *n > 1 || *max <= cutoff)
-            .map(|(id, (max, _))| {
-                if *max <= cutoff {
-                    Pred::eq("run_id", id)
-                } else {
-                    Pred::eq("run_id", id).and(Pred::lt("seq", seq_to_i64(*max)))
-                }
-            })
-            .collect();
-        if !preds.is_empty() {
-            ds.rewrite_where(Pred::Or(preds)).await?;
-        }
-    }
-    // series: the sequence number is the `name`.
-    t.series.latest().await?;
-    let mut best: HashMap<String, (u64, usize)> = HashMap::new();
-    for b in scan(&t.series, Some(like)).await? {
-        let id = col::<StringArray>(&b, "run_id")?;
-        let name = col::<StringArray>(&b, "name")?;
-        for i in 0..b.num_rows() {
-            if id.value(i).starts_with(MARK_PREFIX) {
-                let e = best.entry(id.value(i).to_string()).or_insert((0, 0));
-                e.0 = e.0.max(name.value(i).parse().unwrap_or(0));
-                e.1 += 1;
-            }
-        }
-    }
-    let preds: Vec<Pred> = best
-        .iter()
-        .filter(|(_, (max, n))| *n > 1 || *max <= cutoff)
-        .map(|(id, (max, _))| {
-            if *max <= cutoff {
-                Pred::eq("run_id", id)
-            } else {
-                Pred::eq("run_id", id).and(Pred::ne("name", max.to_string()))
-            }
-        })
-        .collect();
-    if !preds.is_empty() {
-        t.series.rewrite_where(Pred::Or(preds)).await?;
-    }
-    // metrics: series_id 0, the writer's hash in `epoch`, the sequence number in `step`.
-    t.metrics.latest().await?;
-    let mut best: HashMap<i64, (i64, usize)> = HashMap::new();
-    for b in scan(&t.metrics, Some(Pred::eq("series_id", 0i64))).await? {
-        let epoch = col::<Int64Array>(&b, "epoch")?;
-        let step = col::<Int64Array>(&b, "step")?;
-        for i in 0..b.num_rows() {
-            if !epoch.is_null(i) {
-                let e = best.entry(epoch.value(i)).or_insert((0, 0));
-                e.0 = e.0.max(step.value(i));
-                e.1 += 1;
-            }
-        }
-    }
-    let preds: Vec<Pred> = best
-        .iter()
-        .filter(|(_, (max, n))| *n > 1 || (*max as u64) <= cutoff)
-        .map(|(h, (max, _))| {
-            let mark = Pred::eq("series_id", 0i64).and(Pred::eq("epoch", *h));
-            if (*max as u64) <= cutoff {
-                mark
-            } else {
-                mark.and(Pred::lt("step", *max))
-            }
-        })
-        .collect();
-    if !preds.is_empty() {
-        t.metrics.rewrite_where(Pred::Or(preds)).await?;
-    }
-    Ok(())
 }
 
 // ---- WAL records: one per write call, kind 20..23 so they never mix with key-value records.
@@ -2000,7 +1785,6 @@ impl Core {
         t.runs.latest().await?;
         let rows: Vec<_> = read_runs(&scan(&t.runs, None).await?)?
             .into_iter()
-            .filter(|r| !r.1.run_id.starts_with(MARK_PREFIX))
             .collect();
         let mut out: Vec<RunInfo> = merge_runs(rows).into_values().map(|(_, r)| r).collect();
         out.sort_by(|a, b| {
@@ -2074,7 +1858,7 @@ impl Core {
             let key = col::<StringArray>(b, "key")?;
             let value = col::<StringArray>(b, "value")?;
             for i in 0..b.num_rows() {
-                if run.value(i).starts_with(MARK_PREFIX) || dead.contains(run.value(i)) {
+                if dead.contains(run.value(i)) {
                     continue;
                 }
                 let m = current.entry(run.value(i).to_string()).or_default();
@@ -2105,7 +1889,7 @@ impl Core {
         t.series.latest().await?;
         let rows: Vec<SeriesInfo> = read_series_rows(&scan(&t.series, None).await?)?
             .into_iter()
-            .filter(|s| !s.run_id.starts_with(MARK_PREFIX) && !dead.contains(&s.run_id))
+            .filter(|s| !dead.contains(&s.run_id))
             .collect();
         self.known_series
             .lock()
@@ -2198,15 +1982,7 @@ impl Core {
             return Ok(Some(ds.clone()));
         }
         let create = create && self.opts.create_if_missing;
-        match records::open(
-            &self.root,
-            table,
-            create,
-            self.opts.version_retention,
-            self.opts.mark_ttl,
-        )
-        .await
-        {
+        match records::open(&self.root, table, create).await {
             Ok(ds) => {
                 g.insert(table.to_string(), ds.clone());
                 Ok(Some(ds))
@@ -2578,11 +2354,8 @@ impl Core {
             .into_iter()
             .chain(recs.iter_mut().map(|(_, d)| d))
         {
-            report.fragments_rewritten += ds.compact_removed().await?;
             // Every version but the latest and tagged ones.
-            let (v, b) = ds
-                .cleanup(storage::Cleanup::erase(self.opts.orphan_grace))
-                .await?;
+            let (v, b) = ds.cleanup(storage::Cleanup::erase()).await?;
             report.versions_removed += v;
             report.bytes_removed += b;
         }
@@ -2628,7 +2401,6 @@ impl Core {
         self.flush().await?;
         let mut t = self.tables.lock().await;
         let t = &mut *t;
-        prune_marks(t, self.opts.mark_ttl).await?;
         self.expire_tombstones(t).await?;
         // Each rewrite below is planned on the latest version and planned again on a newer
         // one when another rewrite (a background merge, a delete, another optimize) removed
@@ -2662,7 +2434,6 @@ impl Core {
                 }
                 .await
             )?;
-            ds.index(&["item_id", "run_id"]).await?;
             ds.maintain().await?;
             if ds.version() != before {
                 self.keep_record_ds(&name, ds).await;
@@ -2672,7 +2443,7 @@ impl Core {
         // dropped, points of deleted series dropped, and each series' statistics replaced by
         // one exact delta; this rewrite also merges the small files. The series are read after
         // the points' version: a series is always committed before its points.
-        let sorted = replan!(
+        replan!(
             "sort metrics",
             async {
                 t.metrics.latest().await?;
@@ -2687,11 +2458,7 @@ impl Core {
             }
             .await
         )?;
-        if sorted {
-            // Indexes only the new files when the index exists (nothing new: no index work).
-            t.metrics.index(&["series_id"]).await?;
-        }
-        // The engine's own upkeep, where it has one (moraine: checkpoint, log cleanup, vacuum).
+        // moraine's own upkeep: checkpoint, log cleanup, vacuum.
         for ds in [&mut t.runs, &mut t.params, &mut t.series, &mut t.metrics] {
             ds.maintain().await?;
         }
@@ -2700,7 +2467,7 @@ impl Core {
 }
 
 impl Repo {
-    /// Opens (or creates) a repository at `location`: a local path or any URI Lance supports.
+    /// Opens (or creates) a repository at `location`: a local path, `s3://` or `memory://`.
     pub async fn open(location: &str, opts: RepoOptions) -> Result<Repo> {
         let uri = storage::normalize_uri(location)?;
         let root = {
@@ -2708,28 +2475,6 @@ impl Repo {
             let (create, engine) = (opts.create_if_missing, opts.engine);
             rt::spawn(async move { Root::open(&u, &o, create, engine).await }).await?
         };
-        if root.is_lance() {
-            let (u, o) = (uri.clone(), opts.storage_options.clone());
-            let moved = rt::spawn(async move { records::migrate_paths(&u, &o).await }).await?;
-            if !moved.is_empty() {
-                tracing::warn!(uri = %uri, tables = ?moved, "kv0: moved records tables to their current directory names");
-            }
-        }
-        if opts.legacy_records == LegacyRecords::Error {
-            let r = root.clone();
-            let found = rt::spawn(async move { r.exists(r.legacy_records()).await }).await?;
-            if found {
-                return Err(Error::InvalidArgument(format!(
-                    "{uri} has records in the shared {} of an earlier build, which this build \
-                     does not read. Open with legacy_records Allow, read them with \
-                     legacy_records(), append them to tables, then drop_legacy_records()",
-                    root.location(root.legacy_records())
-                        .rsplit('/')
-                        .next()
-                        .unwrap_or_default()
-                )));
-            }
-        }
         let tables = {
             let (root, opts) = (root.clone(), opts.clone());
             rt::spawn(async move {
@@ -2835,7 +2580,6 @@ impl Repo {
             flushing: AtomicBool::new(false),
             maintaining: AtomicBool::new(false),
             compactions: AtomicU64::new(0),
-            last_prune: parking_lot::Mutex::new(None),
             maintained: tokio::sync::Notify::new(),
             panic_next_maintenance: AtomicBool::new(false),
             me: std::sync::OnceLock::new(),
@@ -3088,25 +2832,21 @@ impl Repo {
         rt::spawn(async move { core.read_records(&table, q).await }).await
     }
 
-    /// Every row of the shared `records.lance` of earlier builds (of table `table`, or all),
-    /// in append order, for a one-time migration; empty when there is none.
-    pub async fn legacy_records(&self, table: Option<&str>) -> Result<Vec<Record>> {
-        let (root, table) = (self.inner.core.root.clone(), table.map(str::to_string));
-        rt::spawn(async move { records::read_legacy(&root, table.as_deref()).await }).await
+    /// Always empty. The shared records table of builds before per-table records exists only
+    /// in Lance repositories, which this kv0 does not open; kept so callers written for those
+    /// builds still compile.
+    pub async fn legacy_records(&self, _table: Option<&str>) -> Result<Vec<Record>> {
+        Ok(Vec::new())
     }
 
-    /// Whether the shared `records.lance` of earlier builds exists; one directory listing, no
-    /// rows read.
+    /// Always false (see [`Repo::legacy_records`]).
     pub async fn has_legacy_records(&self) -> Result<bool> {
-        let root = self.inner.core.root.clone();
-        rt::spawn(async move { root.exists(root.legacy_records()).await }).await
+        Ok(false)
     }
 
-    /// Deletes the shared `records.lance` of earlier builds, after a migration. Returns
-    /// whether there was one.
+    /// Does nothing and returns false (see [`Repo::legacy_records`]).
     pub async fn drop_legacy_records(&self) -> Result<bool> {
-        let root = self.inner.core.root.clone();
-        rt::spawn(async move { records::drop_legacy(&root).await }).await
+        Ok(false)
     }
 
     /// Names of the records tables.
@@ -3236,10 +2976,7 @@ impl Repo {
             {
                 ds.latest().await?;
                 // Tagged versions are kept, and do not stop the cleanup of others.
-                removed += ds
-                    .cleanup(storage::Cleanup::before(cutoff, core.opts.orphan_grace))
-                    .await?
-                    .1;
+                removed += ds.cleanup(storage::Cleanup::before(cutoff)).await?.1;
             }
             Ok(removed)
         })
@@ -3784,172 +3521,5 @@ mod fold_tests {
             };
             assert_eq!(strip(folded), strip(unfolded), "case {case}");
         }
-    }
-
-    /// After `optimize` sorts the points, a read of one series reads one file and the row
-    /// groups that hold it: the unsorted files and the other row groups are skipped by their
-    /// statistics.
-    #[cfg(feature = "delta")]
-    #[test]
-    fn series_reads_after_optimize_skip_files_and_row_groups() {
-        let d = tempfile::tempdir().unwrap();
-        let uri = d.path().join("repo").to_string_lossy().into_owned();
-        // A Delta repository: its runs table decides the engine.
-        let runs = storage::join(&uri, "runs");
-        rt::block_on(async move {
-            crate::storage::delta::rows::open(
-                &runs,
-                &StorageOptions::new(),
-                None,
-                schema::RUNS.clone(),
-                true,
-                None,
-                Duration::from_secs(3600),
-            )
-            .await
-        })
-        .unwrap();
-        let opts = RepoOptions {
-            flush_interval: None,
-            wal: false,
-            max_fragments: 0,
-            ..RepoOptions::default()
-        };
-        let repo = {
-            let (u, o) = (uri.clone(), opts.clone());
-            rt::block_on(async move { Repo::open(&u, o).await }).unwrap()
-        };
-        let pts: Vec<TrackPoint> = (0..4000)
-            .map(|i| TrackPoint {
-                value: i as f64,
-                step: Some(i),
-                epoch: None,
-                timestamp: Some(1),
-            })
-            .collect();
-        for r in 0..40 {
-            let run = repo
-                .create_run(NewRun {
-                    run_id: Some(format!("r{r}")),
-                    ..NewRun::default()
-                })
-                .unwrap();
-            run.track_many("loss", None, &pts).unwrap();
-            let rr = repo.clone();
-            rt::block_on(async move { rr.flush().await }).unwrap();
-        }
-        let rr = repo.clone();
-        rt::block_on(async move { rr.optimize().await }).unwrap();
-        // Points logged after optimize stay in a small unsorted file.
-        let late = repo
-            .create_run(NewRun {
-                run_id: Some("late".into()),
-                ..NewRun::default()
-            })
-            .unwrap();
-        late.track_many("loss", None, &pts[..10]).unwrap();
-        let rr = repo.clone();
-        rt::block_on(async move { rr.flush().await }).unwrap();
-        let counts = || {
-            let core = repo.core();
-            rt::block_on(async move {
-                Ok::<_, Error>(core.tables.lock().await.metrics.pruning().expect("delta"))
-            })
-            .unwrap()
-        };
-        let before = counts();
-        let rr = repo.clone();
-        let got = rt::block_on(async move {
-            rr.read_metric(
-                "r7",
-                "loss",
-                &Value::Object(Default::default()),
-                StepRange {
-                    start: Some(100),
-                    stop: Some(200),
-                },
-            )
-            .await
-        })
-        .unwrap();
-        assert_eq!(got.steps, (100..200).collect::<Vec<i64>>());
-        let after = counts();
-        let d: Vec<u64> = (0..4).map(|i| after[i] - before[i]).collect();
-        // [files read, files skipped, row groups read, row groups skipped]
-        assert_eq!(d[0], 1, "{d:?}");
-        assert!(d[1] >= 1, "the unsorted file is skipped: {d:?}");
-        // 160k sorted points are three row groups; one series lies in one, or across two.
-        assert!(d[2] <= 2 && d[3] >= 1, "{d:?}");
-    }
-
-    /// A Delta repository's legacy records live in `_legacy_records/` (written by a
-    /// migration): refused by default, readable and droppable with `LegacyRecords::Allow`.
-    #[cfg(feature = "delta")]
-    #[test]
-    fn delta_legacy_records_are_read_and_dropped() {
-        let d = tempfile::tempdir().unwrap();
-        let uri = d.path().join("repo").to_string_lossy().into_owned();
-        let u = uri.clone();
-        rt::block_on(async move {
-            let o = StorageOptions::new();
-            let ttl = Duration::from_secs(3600);
-            let runs = storage::join(&u, "runs");
-            crate::storage::delta::rows::open(
-                &runs,
-                &o,
-                None,
-                schema::RUNS.clone(),
-                true,
-                None,
-                ttl,
-            )
-            .await?;
-            let root = Root::open(&u, &o, true, None).await?;
-            assert!(root.is_delta());
-            let mut legacy = root
-                .table(
-                    root.legacy_records(),
-                    records::RECORDS.clone(),
-                    true,
-                    None,
-                    ttl,
-                )
-                .await?;
-            let rows = [NewRecord {
-                item_id: "a".into(),
-                run_id: Some("r1".into()),
-                data: serde_json::json!({ "s": 2 }),
-            }];
-            legacy
-                .append(vec![records::batch("scores", &rows, &[5], 7)?], None)
-                .await?;
-            Ok::<_, Error>(())
-        })
-        .unwrap();
-        let open = |legacy: LegacyRecords| {
-            let o = RepoOptions {
-                flush_interval: None,
-                wal: false,
-                legacy_records: legacy,
-                ..RepoOptions::default()
-            };
-            let u = uri.clone();
-            rt::block_on(async move { Repo::open(&u, o).await })
-        };
-        let e = open(LegacyRecords::Error).unwrap_err();
-        assert!(e.to_string().contains("_legacy_records"), "{e}");
-        let repo = open(LegacyRecords::Allow).unwrap();
-        let got = rt::block_on(async move {
-            assert!(repo.has_legacy_records().await?);
-            let all = repo.legacy_records(Some("scores")).await?;
-            assert!(repo.drop_legacy_records().await?);
-            assert!(!repo.has_legacy_records().await?);
-            Ok::<_, Error>(all)
-        })
-        .unwrap();
-        assert_eq!(got.len(), 1);
-        assert_eq!(got[0].seq, 5);
-        assert_eq!(got[0].run_id.as_deref(), Some("r1"));
-        open(LegacyRecords::Error).unwrap();
     }
 }

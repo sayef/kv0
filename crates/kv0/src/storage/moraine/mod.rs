@@ -29,7 +29,7 @@ pub(crate) mod table;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use futures::{StreamExt, TryStreamExt};
+use futures::TryStreamExt;
 use object_store::memory::InMemory;
 use object_store::path::Path;
 use object_store::{ObjectStore, ObjectStoreExt as _, PutMode, PutOptions};
@@ -236,38 +236,6 @@ impl Repo {
             .filter(|n| !n.starts_with('_'))
             .collect())
     }
-
-    /// Whether the table exists: its first log entry does.
-    pub(crate) async fn exists(&self, kv0_name: &str) -> Result<bool> {
-        let first = format!("{}/data/_delta_log/{:020}.json", table_name(kv0_name), 0);
-        match self.store.head(&self.path(&first)).await {
-            Ok(_) => Ok(true),
-            Err(object_store::Error::NotFound { .. }) => Ok(false),
-            Err(e) => Err(e.into()),
-        }
-    }
-
-    /// Deletes a table and every file of it.
-    pub(crate) async fn remove(&self, kv0_name: &str) -> Result<()> {
-        let name = table_name(kv0_name);
-        let dir = self.path(&name);
-        let files = self.store.list(Some(&dir)).map_ok(|m| m.location).boxed();
-        self.store
-            .delete_stream(files)
-            .try_collect::<Vec<_>>()
-            .await?;
-        if kv0_name.starts_with("records/") {
-            match self
-                .store
-                .delete(&self.path(&format!("{NAMES}/{name}")))
-                .await
-            {
-                Ok(()) | Err(object_store::Error::NotFound { .. }) => {}
-                Err(e) => return Err(e.into()),
-            }
-        }
-        Ok(())
-    }
 }
 
 /// kv0's storage options as moraine's object store reads them: empty values dropped.
@@ -276,7 +244,10 @@ fn store_options(options: &StorageOptions) -> StorageOptions {
 }
 
 /// The store and prefix of a location, for kv0's own files there.
-fn store_for(uri: &str, options: &StorageOptions) -> Result<(Arc<dyn ObjectStore>, Path)> {
+pub(crate) fn store_for(
+    uri: &str,
+    options: &StorageOptions,
+) -> Result<(Arc<dyn ObjectStore>, Path)> {
     let bad = |e: String| Error::InvalidArgument(format!("{uri}: {e}"));
     if let Some(rest) = uri.strip_prefix("s3://") {
         let (bucket, prefix) = rest.split_once('/').unwrap_or((rest, ""));
@@ -423,71 +394,6 @@ mod tests {
         assert_eq!(decode_records_name(&n), None);
         assert_ne!(n, table_name(&format!("records/{long}z")));
         assert_eq!(table_name("metrics"), "metrics");
-    }
-
-    /// A prefix match finds exactly the rows starting with the prefix, wildcards and the escape
-    /// character included, through moraine's file and page pruning.
-    #[test]
-    fn prefix_scans_match_literally() {
-        use arrow_array_59::{Array as _, RecordBatch, StringArray};
-        use arrow_schema_59::{DataType, Field, Schema};
-
-        use crate::storage::pred::{to_expr, Pred};
-
-        let ids = ["a_b1", "axb2", "a%c", "abc", r"a\d", "a_", "b_b1"];
-        let got = crate::rt::block_on(async move {
-            let db = moraine::Database::builder_for_store(Arc::new(InMemory::new()), "t")
-                .consistency(moraine::Consistency::Strong)
-                .open()
-                .await
-                .map_err(error)?;
-            let schema = Arc::new(Schema::new(vec![Field::new(
-                "run_id",
-                DataType::Utf8,
-                false,
-            )]));
-            let t = db
-                .create_table(
-                    "runs",
-                    schema.clone(),
-                    moraine::TableOptions {
-                        cluster_by: vec!["run_id".into()],
-                        ..Default::default()
-                    },
-                )
-                .await
-                .map_err(error)?;
-            // One file per row, so file pruning has something to skip.
-            for id in ids {
-                let b = RecordBatch::try_new(
-                    schema.clone(),
-                    vec![Arc::new(StringArray::from(vec![id]))],
-                )?;
-                t.append(vec![b]).await.map_err(error)?;
-            }
-            let mut out = Vec::new();
-            for prefix in ["a_", "a%", r"a\", "ab", "", "c"] {
-                let e = to_expr(&Pred::StartsWith("run_id", prefix.into()), &schema);
-                let mut found: Vec<String> = Vec::new();
-                for b in t.scan().filter(e).collect().await.map_err(error)? {
-                    let c = b.column(0).as_any().downcast_ref::<StringArray>().unwrap();
-                    found.extend((0..c.len()).map(|i| c.value(i).to_string()));
-                }
-                found.sort();
-                out.push(found);
-            }
-            Ok::<_, Error>(out)
-        })
-        .unwrap();
-        let want = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        assert_eq!(got[0], want(&["a_", "a_b1"]));
-        assert_eq!(got[1], want(&["a%c"]));
-        assert_eq!(got[2], want(&[r"a\d"]));
-        assert_eq!(got[3], want(&["abc"]));
-        let mut all = want(&ids);
-        all.sort();
-        assert_eq!(got[4], all);
-        assert!(got[5].is_empty());
     }
 
     #[test]

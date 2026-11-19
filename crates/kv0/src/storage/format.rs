@@ -1,31 +1,34 @@
-//! What a location holds, and which engine opens it.
+//! What a location holds, and whether this kv0 opens it.
 //!
-//! A location written by the Delta Lake engine carries a marker, `_kv0/format.json`, written
-//! once when it is created:
+//! kv0 stores everything in moraine databases. A location carries a marker, `_kv0/format.json`,
+//! written once when it is created:
 //!
 //! ```json
-//! {"engine":"delta","version":1,"kind":"database","created_by":"kv0 0.1.0-beta.3"}
+//! {"engine":"moraine","version":1,"kind":"database","created_by":"kv0 0.1.0-beta.3"}
 //! ```
 //!
-//! Each of its tables also records `kv0.format = delta/1` in its version-0 metadata. Locations
-//! from before the marker are recognised by their layout: a Delta log (`_delta_log/`) or a
-//! Lance dataset (`_versions/`) for a key-value database, `runs/` or `runs.lance/` (and the
-//! other tables) for a tracking repository. Detection costs one listing of the location, plus
-//! one read when the marker is there.
+//! Locations written by earlier kv0 releases, with the Lance or the Delta Lake engine, are
+//! recognised by their marker or their layout, only to be refused: a Lance dataset
+//! (`_versions/`) or a Delta log (`_delta_log/`) for a key-value database, `runs.lance/` or
+//! `runs/_delta_log/` (and the other tables) for a tracking repository. A moraine location
+//! without a marker is recognised by its tables' logs under `<table>/data/`. Detection costs
+//! one listing of the location, plus one read when the marker is there.
 
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 use crate::storage::{is_local, StorageOptions};
 
-/// The storage engine of a location.
+/// The storage engine of a location. kv0 reads and writes moraine only; the other engines are
+/// those of earlier releases, recognised so that their locations are refused rather than
+/// overwritten.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Engine {
-    /// Lance datasets: the format of kv0 0.1.0-beta.2 and earlier.
+    /// Lance datasets: the format of kv0 0.1.0-beta.2 and earlier. Not readable.
     Lance,
-    /// Delta Lake tables (delta-rs).
+    /// Delta Lake tables written by delta-rs, before moraine. Not readable.
     Delta,
-    /// moraine databases.
+    /// moraine databases: the only engine.
     Moraine,
 }
 
@@ -39,9 +42,9 @@ impl Engine {
         }
     }
 
-    /// The engine for new locations named by the environment: `KV0_ENGINE` (`lance`, `delta`
-    /// or `moraine`), else `KV0_TEST_BACKEND` (what kv0's own test suites set). `None` when neither
-    /// is set; an unknown name is an error.
+    /// The engine for new locations named by the environment: `KV0_ENGINE`, else
+    /// `KV0_TEST_BACKEND` (what kv0's own test suites set). `None` when neither is set; an
+    /// unknown name is an error, and only `moraine` can be used.
     pub fn from_env() -> Result<Option<Engine>> {
         for var in ["KV0_ENGINE", "KV0_TEST_BACKEND"] {
             if let Ok(v) = std::env::var(var) {
@@ -117,7 +120,6 @@ pub(crate) enum Kind {
 }
 
 impl Kind {
-    #[cfg_attr(not(any(feature = "delta", feature = "moraine")), allow(dead_code))]
     pub(crate) fn name(self) -> &'static str {
         match self {
             Kind::Database => "database",
@@ -141,7 +143,8 @@ const LANCE_TABLES: [&str; 5] = [
     "metrics.lance",
     "records.lance",
 ];
-/// The same for a Delta repository written before the marker existed.
+/// The tables of a tracking repository, in moraine (`<table>/data/_delta_log/`) and in the
+/// Delta Lake engine of earlier releases (`<table>/_delta_log/`).
 const DELTA_TABLES: [&str; 4] = ["runs", "params", "series", "metrics"];
 
 /// Finds what `location` holds (one listing, and one read when it carries a marker). A
@@ -218,24 +221,49 @@ pub(crate) async fn detect_uri(uri: &str, options: &StorageOptions) -> Result<Fo
     })
 }
 
-/// The engine that opens the location `uri` of `kind`, or why none can.
+/// What a location of an earlier kv0 release holds, and what to do about it.
+fn refused(uri: &str, kind: Kind, engine: Engine) -> Error {
+    let name = match engine {
+        Engine::Lance => "the Lance engine (kv0 0.1.0-beta.2 and earlier)",
+        _ => "the Delta Lake engine of an earlier kv0",
+    };
+    Error::NotSupported(format!(
+        "{uri} holds {} written with {name}, which this kv0 no longer reads. There is no \
+         migration while kv0 is in beta: recreate it with this kv0 at a new location, reading \
+         what you need to keep with the kv0 release that wrote it",
+        kind.noun()
+    ))
+}
+
+/// The engine that opens the location `uri` of `kind` (always moraine), and what the location
+/// holds, or why it cannot be opened.
 ///
-/// - An existing location keeps the engine it was written with. When `wanted` names another
-///   engine, the open fails: a Lance location asked to open with Delta points to `kv0 migrate`.
-/// - A new (empty or unrecognised) location uses `wanted`, else the engine `KV0_ENGINE` names,
-///   else Lance.
+/// - A location written with the Lance or Delta Lake engine of an earlier release fails,
+///   saying to recreate it.
+/// - `wanted`, else the engine `KV0_ENGINE` names, must be moraine when given.
 /// - A database location opened as a repository (or the reverse) fails.
-/// - A build without the `delta` feature refuses Delta locations.
 pub(crate) async fn choose(
     uri: &str,
     options: &StorageOptions,
     kind: Kind,
     wanted: Option<Engine>,
 ) -> Result<(Engine, Format)> {
+    let wanted = match wanted {
+        Some(e) => Some(e),
+        None => Engine::from_env()?,
+    };
+    if let Some(e @ (Engine::Lance | Engine::Delta)) = wanted {
+        return Err(Error::NotSupported(format!(
+            "the {e} engine was removed: kv0 stores every database and repository with moraine \
+             (engine \"moraine\", or none)"
+        )));
+    }
     let format = detect_uri(uri, options).await?;
-    let found = match (format, kind) {
+    match (format, kind) {
         (Format::Database(e), Kind::Database) | (Format::Repository(e), Kind::Repository) => {
-            Some(e)
+            if e != Engine::Moraine {
+                return Err(refused(uri, kind, e));
+            }
         }
         (Format::Database(_), Kind::Repository) | (Format::Repository(_), Kind::Database) => {
             let other = if kind == Kind::Database {
@@ -249,103 +277,13 @@ pub(crate) async fn choose(
                 kind.noun()
             )));
         }
-        (Format::Empty | Format::Unknown, _) => None,
-    };
-    let engine = match (found, wanted) {
-        (Some(Engine::Lance), Some(Engine::Delta)) => {
-            return Err(Error::NotSupported(format!(
-                "{uri} holds {} in the Lance format (kv0 0.1.0-beta.2 and earlier), not Delta Lake. \
-                 Convert it with `kv0 migrate {uri} <new location>` (cargo install kv0 --features lance-migrate); \
-                 see docs/guides/migration.md",
-                kind.noun()
-            )));
-        }
-        (Some(Engine::Delta), Some(Engine::Lance)) => {
-            return Err(Error::NotSupported(format!(
-                "{uri} holds {} in the Delta Lake format; the Lance engine cannot open it",
-                kind.noun()
-            )));
-        }
-        (Some(found), Some(w)) if found != w => {
-            return Err(Error::NotSupported(format!(
-                "{uri} holds {} in the {} format; the {} engine cannot open it",
-                kind.noun(),
-                found,
-                w
-            )));
-        }
-        (Some(e), _) => e,
-        (None, Some(e)) => e,
-        (None, None) => Engine::from_env()?.unwrap_or(Engine::Lance),
-    };
-    if engine == Engine::Delta && !cfg!(feature = "delta") {
-        return Err(Error::NotSupported(if found.is_some() {
-            format!(
-                "{uri} holds {} in the Delta Lake format; this build of kv0 has only the Lance engine (enable the `delta` feature)",
-                kind.noun()
-            )
-        } else {
-            "the Delta Lake engine was chosen, but this build of kv0 has only the Lance engine (enable the `delta` feature)".to_string()
-        }));
+        (Format::Empty | Format::Unknown, _) => {}
     }
-    if engine == Engine::Moraine && !cfg!(feature = "moraine") {
-        return Err(Error::NotSupported(if found.is_some() {
-            format!(
-                "{uri} holds {} in the moraine format; this build of kv0 has no moraine engine (enable the `moraine` feature)",
-                kind.noun()
-            )
-        } else {
-            "the moraine engine was chosen, but this build of kv0 does not have it (enable the `moraine` feature)".to_string()
-        }));
-    }
-    Ok((engine, format))
+    Ok((Engine::Moraine, format))
 }
 
-/// Writes the marker of a new Delta location of `kind`, unless one exists. Done before the
-/// first table is created, so a concurrent opener (or one after a crash in between) already
-/// sees the engine. `memory://` locations get none: nothing else can see them.
-#[cfg(feature = "delta")]
-pub(crate) async fn write_marker(uri: &str, options: &StorageOptions, kind: Kind) -> Result<()> {
-    use deltalake_core::logstore::object_store::{PutMode, PutOptions};
-    use deltalake_core::{ObjectStoreError, Path};
-    if uri.starts_with("memory://") {
-        return Ok(());
-    }
-    if is_local(uri) {
-        let dir = uri.strip_prefix("file://").unwrap_or(uri);
-        std::fs::create_dir_all(dir).map_err(|e| Error::Io(format!("{dir}: {e}")))?;
-    }
-    let body = serde_json::to_vec(&Marker {
-        engine: Engine::Delta.name().into(),
-        version: FORMAT_VERSION,
-        kind: Some(kind.name().into()),
-        created_by: Some(format!("kv0 {}", env!("CARGO_PKG_VERSION"))),
-    })?;
-    let store = super::delta::table::handle(uri, options)?.object_store();
-    let mut attempt = 0;
-    loop {
-        let put = store
-            .put_opts(
-                &Path::from(MARKER),
-                body.clone().into(),
-                PutOptions::from(PutMode::Create),
-            )
-            .await;
-        match put {
-            Ok(_) | Err(ObjectStoreError::AlreadyExists { .. }) => return Ok(()),
-            Err(e) if attempt < RETRIES => {
-                attempt += 1;
-                tracing::debug!(uri, attempt, error = %e, "kv0: writing the format marker failed; again");
-                tokio::time::sleep(crate::storage::backoff(attempt, 50, 1_000)).await;
-            }
-            Err(e) => return Err(e.into()),
-        }
-    }
-}
-
-/// Attempts after the first for the marker's remote reads and writes (object stores fail
+/// Attempts after the first for the marker's remote reads and listings (object stores fail
 /// requests now and then).
-#[cfg(feature = "delta")]
 const RETRIES: u32 = 3;
 
 /// Names directly under `uri` (empty when it does not exist).
@@ -361,37 +299,31 @@ pub(crate) async fn list(uri: &str, options: &StorageOptions) -> Result<Vec<Stri
             Err(e) => Err(Error::Io(format!("{path}: {e}"))),
         };
     }
-    #[cfg(feature = "delta")]
-    {
-        use deltalake_core::ObjectStoreError;
-        let store = super::delta::table::handle(uri, options)?.object_store();
-        let mut attempt = 0;
-        let listed = loop {
-            match store.list_with_delimiter(None).await {
-                Ok(l) => break l,
-                Err(ObjectStoreError::NotFound { .. }) => return Ok(Vec::new()),
-                Err(e) if attempt < RETRIES => {
-                    attempt += 1;
-                    tracing::debug!(uri, attempt, error = %e, "kv0: listing a location failed; again");
-                    tokio::time::sleep(crate::storage::backoff(attempt, 50, 1_000)).await;
-                }
-                Err(e) => return Err(e.into()),
+    let (store, prefix) = super::moraine::store_for(uri, options)?;
+    let mut attempt = 0;
+    let listed = loop {
+        match store.list_with_delimiter(Some(&prefix)).await {
+            Ok(l) => break l,
+            Err(object_store::Error::NotFound { .. }) => return Ok(Vec::new()),
+            Err(e) if attempt < RETRIES => {
+                attempt += 1;
+                tracing::debug!(uri, attempt, error = %e, "kv0: listing a location failed; again");
+                tokio::time::sleep(crate::storage::backoff(attempt, 50, 1_000)).await;
             }
-        };
-        Ok(listed
-            .common_prefixes
-            .iter()
-            .filter_map(|p| p.filename().map(str::to_string))
-            .chain(
-                listed
-                    .objects
-                    .iter()
-                    .filter_map(|o| o.location.filename().map(str::to_string)),
-            )
-            .collect())
-    }
-    #[cfg(not(feature = "delta"))]
-    super::list_dir(uri, options).await
+            Err(e) => return Err(e.into()),
+        }
+    };
+    Ok(listed
+        .common_prefixes
+        .iter()
+        .filter_map(|p| p.filename().map(str::to_string))
+        .chain(
+            listed
+                .objects
+                .iter()
+                .filter_map(|o| o.location.filename().map(str::to_string)),
+        )
+        .collect())
 }
 
 /// The marker of `uri`, when it has one.
@@ -414,16 +346,15 @@ pub(crate) async fn read_marker(uri: &str, options: &StorageOptions) -> Result<O
     }
 }
 
-#[cfg(feature = "delta")]
 async fn read_remote(uri: &str, options: &StorageOptions) -> Result<Option<Vec<u8>>> {
-    use deltalake_core::logstore::object_store::ObjectStoreExt;
-    use deltalake_core::{ObjectStoreError, Path};
-    let store = super::delta::table::handle(uri, options)?.object_store();
+    use object_store::ObjectStoreExt as _;
+    let (store, prefix) = super::moraine::store_for(uri, options)?;
+    let path = MARKER.split('/').fold(prefix, |p, part| p.join(part));
     let mut attempt = 0;
     loop {
-        let got = match store.get(&Path::from(MARKER)).await {
+        let got = match store.get(&path).await {
             Ok(r) => r.bytes().await.map(|b| Some(b.to_vec())),
-            Err(ObjectStoreError::NotFound { .. }) => return Ok(None),
+            Err(object_store::Error::NotFound { .. }) => return Ok(None),
             Err(e) => Err(e),
         };
         match got {
@@ -436,11 +367,6 @@ async fn read_remote(uri: &str, options: &StorageOptions) -> Result<Option<Vec<u
             Err(e) => return Err(e.into()),
         }
     }
-}
-
-#[cfg(not(feature = "delta"))]
-async fn read_remote(uri: &str, options: &StorageOptions) -> Result<Option<Vec<u8>>> {
-    super::lance::read_file(&super::join(uri, MARKER), options).await
 }
 
 #[cfg(test)]
@@ -533,14 +459,17 @@ mod tests {
     }
 
     #[test]
-    fn engines_are_chosen_and_mismatches_refused() {
+    fn earlier_engines_are_refused_and_mismatches_too() {
         let d = tempfile::tempdir().unwrap();
         let o = StorageOptions::new();
         let lance = d.path().join("lance");
         std::fs::create_dir_all(lance.join("_versions")).unwrap();
         let lance = lance.to_string_lossy().into_owned();
+        let delta = d.path().join("delta");
+        std::fs::create_dir_all(delta.join("runs/_delta_log")).unwrap();
+        let delta = delta.to_string_lossy().into_owned();
         let repo = d.path().join("repo");
-        std::fs::create_dir_all(repo.join("runs.lance")).unwrap();
+        std::fs::create_dir_all(repo.join("runs/data/_delta_log")).unwrap();
         let repo = repo.to_string_lossy().into_owned();
         let new = d.path().join("new").to_string_lossy().into_owned();
         crate::rt::block_on(async move {
@@ -548,53 +477,39 @@ mod tests {
                 let (u, o) = (u.to_string(), o.clone());
                 async move { choose(&u, &o, k, w).await }
             };
+            for (u, k) in [(&lance, Kind::Database), (&delta, Kind::Repository)] {
+                let e = ch(u, k, Some(Engine::Moraine)).await.unwrap_err();
+                assert!(
+                    matches!(&e, Error::NotSupported(m) if m.contains("recreate")),
+                    "{e}"
+                );
+            }
+            for old in [Engine::Lance, Engine::Delta] {
+                let e = ch(&new, Kind::Database, Some(old)).await.unwrap_err();
+                assert!(
+                    matches!(&e, Error::NotSupported(m) if m.contains("removed")),
+                    "{e}"
+                );
+            }
             assert_eq!(
-                ch(&lance, Kind::Database, None).await.unwrap().0,
-                Engine::Lance
-            );
-            assert_eq!(
-                ch(&lance, Kind::Database, Some(Engine::Lance))
+                ch(&repo, Kind::Repository, Some(Engine::Moraine))
                     .await
-                    .unwrap()
-                    .0,
-                Engine::Lance
+                    .unwrap(),
+                (Engine::Moraine, Format::Repository(Engine::Moraine))
             );
-            let e = ch(&lance, Kind::Database, Some(Engine::Delta))
+            let e = ch(&repo, Kind::Database, Some(Engine::Moraine))
                 .await
                 .unwrap_err();
-            assert!(
-                matches!(&e, Error::NotSupported(m) if m.contains("kv0 migrate")),
-                "{e}"
-            );
-            let e = ch(&repo, Kind::Database, None).await.unwrap_err();
             assert!(
                 matches!(&e, Error::InvalidArgument(m) if m.contains("tracking repository")),
                 "{e}"
             );
-            let e = ch(&lance, Kind::Repository, None).await.unwrap_err();
-            assert!(matches!(&e, Error::InvalidArgument(_)), "{e}");
             assert_eq!(
-                ch(&new, Kind::Database, Some(Engine::Lance))
+                ch(&new, Kind::Database, Some(Engine::Moraine))
                     .await
-                    .unwrap()
-                    .1,
-                Format::Empty
+                    .unwrap(),
+                (Engine::Moraine, Format::Empty)
             );
-            // A new location takes moraine when the build has it; a Lance location stays Lance.
-            let kv = ch(&new, Kind::Database, Some(Engine::Moraine)).await;
-            assert_eq!(kv.is_ok(), cfg!(feature = "moraine"), "{kv:?}");
-            let e = ch(&repo, Kind::Repository, Some(Engine::Moraine))
-                .await
-                .unwrap_err();
-            assert!(matches!(e, Error::NotSupported(_)), "{e}");
-            let moraine = ch(&new, Kind::Repository, Some(Engine::Moraine)).await;
-            assert_eq!(moraine.is_ok(), cfg!(feature = "moraine"), "{moraine:?}");
-            let delta = ch(&new, Kind::Database, Some(Engine::Delta)).await;
-            if cfg!(feature = "delta") {
-                assert_eq!(delta.unwrap().0, Engine::Delta);
-            } else {
-                assert!(matches!(delta, Err(Error::NotSupported(_))));
-            }
         });
     }
 }

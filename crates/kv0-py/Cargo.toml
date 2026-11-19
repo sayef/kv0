@@ -20,10 +20,6 @@ serde_json = "1"
 tracing = { version = "0.1", default-features = false, features = ["log"] }
 kv0_rs = { package = "kv0", path = "../kv0" }
 
-[features]
-# The Delta Lake engine of kv0 (off by default while both engines coexist; see CONTRIBUTING.md).
-delta = ["kv0_rs/delta"]
-
 # Not on macOS, where every mimalloc in a process shares fixed thread slots and pyarrow ships one.
 [target.'cfg(target_os = "linux")'.dependencies]
 # `local_dynamic_tls`: the module is loaded with dlopen, where initial-exec TLS can exhaust the
@@ -34,5 +30,5 @@ libmimalloc-sys = { version = "0.1", default-features = false, features = ["exte
 
 [package.metadata.cargo-machete]
 # `tracing` is never named in the code: the dependency only turns on its `log` feature, so kv0's
-# and Lance's tracing events reach `log` and, through `pyo3-log`, Python's logging.
+# and moraine's tracing events reach `log` and, through `pyo3-log`, Python's logging.
 ignored = ["tracing"]

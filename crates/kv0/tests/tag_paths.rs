@@ -38,21 +38,15 @@ fn key_value_tags_under_a_path_with_special_characters_protect_their_version() {
             Some(&b"v1"[..]),
             "{name}"
         );
-        // Lance keeps tags under `_refs/`, Delta under `_kv0/tags/`, moraine (pins) with the
-        // `ops` table.
-        let refs =
-            std::path::Path::new(&path).join(match std::env::var("KV0_TEST_BACKEND").as_deref() {
-                Ok("delta") => "_kv0/tags",
-                Ok("moraine") => "ops/meta/pins",
-                _ => "_refs",
-            });
+        // moraine keeps pins (kv0's tags) with the `ops` table.
+        let refs = std::path::Path::new(&path).join("ops/meta/pins");
         assert!(
             refs.exists(),
             "{name}: the tag is in the dataset's own directory"
         );
     }
-    // Lance (14.0) also creates an empty, percent-encoded twin of such a path (`db%7E1`) when
-    // tagging; it must hold nothing, since the tags above are in the dataset itself.
+    // No percent-encoded twin of such a path (`db%7E1`) holds anything: the tags above are in
+    // the database itself.
     fn files(p: &std::path::Path) -> usize {
         std::fs::read_dir(p).map_or(0, |rd| {
             rd.flatten()
@@ -138,11 +132,7 @@ fn records_tags_on_tables_with_special_characters_protect_their_version() {
     .unwrap_err();
     assert!(e.to_string().contains("kept"), "{e}");
     // moraine keeps records tables next to the others (`rec-<encoded name>`).
-    let dir = if std::env::var("KV0_TEST_BACKEND").as_deref() == Ok("moraine") {
-        d.path().join("repo~x")
-    } else {
-        d.path().join("repo~x/records")
-    };
+    let dir = d.path().join("repo~x");
     let names: Vec<String> = std::fs::read_dir(dir)
         .unwrap()
         .map(|e| e.unwrap().file_name().into_string().unwrap())
@@ -151,75 +141,6 @@ fn records_tags_on_tables_with_special_characters_protect_their_version() {
         names.iter().all(|n| !n.contains('%')),
         "no stray tag directory: {names:?}"
     );
-}
-
-#[test]
-fn records_tables_from_the_earlier_directory_names_are_moved_with_their_tags() {
-    if matches!(
-        std::env::var("KV0_TEST_BACKEND").as_deref(),
-        Ok("delta" | "moraine")
-    ) {
-        return; // the `~XX` names were only ever written as Lance datasets
-    }
-    use kv0::rt::block_on;
-    use kv0::tracking::{At, RecordQuery, Repo, RepoOptions};
-    let d = tempfile::tempdir().unwrap();
-    let root = d.path().join("repo");
-    let records = root.join("records");
-    std::fs::create_dir_all(&records).unwrap();
-    // The layout an earlier build left: data under `~XX`, a tag under the `%7E` twin.
-    let o = || RepoOptions {
-        flush_interval: None,
-        wal_dir: Some(d.path().join("wal")),
-        ..RepoOptions::default()
-    };
-    let uri = root.to_string_lossy().into_owned();
-    let repo = {
-        let (uri, o) = (uri.clone(), o());
-        block_on(async move { Repo::open(&uri, o).await }).unwrap()
-    };
-    let r = repo.clone();
-    let v = block_on(async move {
-        r.append_records(
-            "dataset:qa",
-            vec![kv0::tracking::NewRecord {
-                item_id: "a".into(),
-                run_id: None,
-                data: serde_json::json!({ "v": 1 }),
-            }],
-        )
-        .await
-    })
-    .unwrap();
-    drop(repo);
-    let new = records.join("dataset=3Aqa.lance");
-    std::fs::rename(&new, records.join("dataset~3Aqa.lance")).unwrap();
-    let stray = records.join("dataset%7E3Aqa.lance/_refs/tags");
-    std::fs::create_dir_all(&stray).unwrap();
-    std::fs::write(
-        stray.join("audit.json"),
-        serde_json::json!({ "branch": null, "version": v, "manifestSize": 0 }).to_string(),
-    )
-    .unwrap();
-
-    let repo = {
-        let (uri, o) = (uri.clone(), o());
-        block_on(async move { Repo::open(&uri, o).await }).unwrap()
-    };
-    assert!(new.join("_refs/tags/audit.json").exists());
-    let names: Vec<String> = std::fs::read_dir(&records)
-        .unwrap()
-        .map(|e| e.unwrap().file_name().into_string().unwrap())
-        .collect();
-    assert_eq!(names, ["dataset=3Aqa.lance"]);
-    let r = repo.clone();
-    let (tables, tags) = block_on(async move {
-        Ok::<_, kv0::Error>((r.record_tables().await?, r.record_tags("dataset:qa").await?))
-    })
-    .unwrap();
-    assert_eq!(tables, ["dataset:qa"]);
-    assert_eq!(tags.len(), 1);
-    let _ = (At::Latest, RecordQuery::default());
 }
 
 /// Runs `f` on another thread and fails the test if it takes longer than `secs`.
@@ -324,80 +245,6 @@ fn reads_by_tag_or_cleaned_up_version_finish_promptly() {
         .is_err()
     });
     assert!(opened);
-}
-
-#[test]
-fn processes_opening_an_earlier_layout_at_once_all_succeed() {
-    if matches!(
-        std::env::var("KV0_TEST_BACKEND").as_deref(),
-        Ok("delta" | "moraine")
-    ) {
-        return; // the `~XX` names were only ever written as Lance datasets
-    }
-    use kv0::rt::block_on;
-    use kv0::tracking::{Repo, RepoOptions};
-    let d = tempfile::tempdir().unwrap();
-    let root = d.path().join("repo");
-    let records = root.join("records");
-    let uri = root.to_string_lossy().into_owned();
-    let open = |wal: &str| {
-        let o = RepoOptions {
-            flush_interval: None,
-            wal_dir: Some(d.path().join(wal)),
-            ..RepoOptions::default()
-        };
-        let uri = uri.clone();
-        move || block_on(async move { Repo::open(&uri, o).await })
-    };
-    let repo = open("w")().unwrap();
-    let r = repo.clone();
-    let v = block_on(async move {
-        let mut v = 0;
-        for t in ["a:1", "b:2", "c:3"] {
-            v = r
-                .append_records(
-                    t,
-                    vec![kv0::tracking::NewRecord {
-                        item_id: "x".into(),
-                        run_id: None,
-                        data: serde_json::json!({}),
-                    }],
-                )
-                .await?;
-        }
-        Ok::<_, kv0::Error>(v)
-    })
-    .unwrap();
-    drop(repo);
-    for (new, old) in [("a=3A1", "a~3A1"), ("b=3A2", "b~3A2"), ("c=3A3", "c~3A3")] {
-        std::fs::rename(
-            records.join(format!("{new}.lance")),
-            records.join(format!("{old}.lance")),
-        )
-        .unwrap();
-        let stray = records.join(format!("{}.lance/_refs/tags", old.replace('~', "%7E")));
-        std::fs::create_dir_all(&stray).unwrap();
-        std::fs::write(
-            stray.join("t.json"),
-            serde_json::json!({ "branch": null, "version": v, "manifestSize": 0 }).to_string(),
-        )
-        .unwrap();
-    }
-    let opens: Vec<_> = (0..6)
-        .map(|i| std::thread::spawn(open(&format!("w{i}"))))
-        .collect();
-    for h in opens {
-        h.join().unwrap().expect("every concurrent open succeeds");
-    }
-    let mut names: Vec<String> = std::fs::read_dir(&records)
-        .unwrap()
-        .map(|e| e.unwrap().file_name().into_string().unwrap())
-        .collect();
-    names.sort();
-    assert_eq!(names, ["a=3A1.lance", "b=3A2.lance", "c=3A3.lance"]);
-    for n in &names {
-        assert!(records.join(n).join("_refs/tags/t.json").exists(), "{n}");
-    }
 }
 
 #[test]

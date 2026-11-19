@@ -1,4 +1,4 @@
-"""Storage behaviour new in the Lance engine: persistence, refresh, time travel, errors."""
+"""Storage behaviour: persistence, refresh, time travel, errors."""
 
 import os
 import pathlib
@@ -80,10 +80,16 @@ def test_time_travel(tmp_path):
     db.put(b"k", b"old", sync=True)
     v = db.version
     db.put(b"k", b"new", sync=True)
+    # Only the latest and tagged versions stay readable.
+    with pytest.raises(errors.NotFound):
+        kv0.DB(path, _opts(version=v))
+    db.create_tag("old", v)
     old = kv0.DB(path, _opts(version=v))
     assert old.get(b"k") == b"old"
     assert old.read_only
-    assert [n for n, _ in db.versions()][-1] == db.version
+    # The tagged version and the latest (a tag commits a version of its own).
+    versions = [n for n, _ in db.versions()]
+    assert len(versions) == 2 and versions[0] == v and versions[1] >= db.version
 
 
 def test_memory_uri():
@@ -151,8 +157,8 @@ def test_unclosed_handles_flush_at_exit(tmp_path):
     assert Repo(str(tmp_path / "repo")).metric("r1", "m")["values"] == [1.0]
 
 
-def test_no_deadlock_when_lance_logs_during_flush(tmp_path):
-    # Lance logs from its runtime threads through pyo3-log, which needs the GIL. Writes that flush
+def test_no_deadlock_when_storage_logs_during_flush(tmp_path):
+    # The storage engine logs from its runtime threads through pyo3-log, which needs the GIL. Writes that flush
     # inline, reads that refresh and dropping the last handle must not hold it.
     import subprocess
     import sys
@@ -479,18 +485,30 @@ def test_long_idle_writer_wal_is_not_mistaken_for_stale(tmp_path):
 
 
 def test_engine_option_and_mismatch(tmp_path):
-    # A database created with Lance keeps it; asking for Delta Lake points to the migration.
+    # moraine is the only engine: the earlier engines are refused for new and existing locations.
     path = str(tmp_path / "db")
-    db = kv0.DB(path, _opts(engine="lance"))
+    db = kv0.DB(path, _opts(engine="moraine"))
     db.put(b"k", b"v")
     db.close()
-    with pytest.raises(errors.NotSupported, match="kv0 migrate"):
-        kv0.DB(path, _opts(engine="delta"))
+    for old in ("lance", "delta"):
+        with pytest.raises(errors.NotSupported):
+            kv0.DB(path, _opts(engine=old))
+        with pytest.raises(errors.NotSupported):
+            kv0.DB(str(tmp_path / f"new-{old}"), _opts(engine=old))
     with pytest.raises(errors.InvalidArgument):
         kv0.DB(str(tmp_path / "other"), _opts(engine="rocks"))
     from kv0.tracking import Repo
 
     repo_path = str(tmp_path / "repo")
-    Repo(repo_path, engine="lance", flush_interval=None).close()
-    with pytest.raises(errors.NotSupported, match="kv0 migrate"):
-        Repo(repo_path, engine="delta", flush_interval=None)
+    Repo(repo_path, engine="moraine", flush_interval=None).close()
+    with pytest.raises(errors.NotSupported):
+        Repo(repo_path, engine="lance", flush_interval=None)
+
+
+def test_a_lance_database_is_refused_with_a_way_out(tmp_path):
+    # A Lance dataset of kv0 0.1.0-beta.2 and earlier is detected and refused, not overwritten.
+    path = tmp_path / "old"
+    (path / "_versions").mkdir(parents=True)
+    with pytest.raises(errors.NotSupported, match="recreate"):
+        kv0.DB(str(path), _opts())
+    assert sorted(p.name for p in path.iterdir()) == ["_versions"]
