@@ -14,9 +14,12 @@ All notable changes to this project are documented here. The format follows
   repository is one moraine database with a table per kv0 table. Each commit is one conditional
   write of a log entry, and a write-ahead log replays exactly once through moraine transaction
   ids.
-- Locations written by kv0 0.1.0-beta.2 and earlier (Lance datasets) are recognised and refused
-  with `NotSupported`, with a message to recreate them. I chose not to ship a migration while kv0
-  is in beta: read the data with the release that wrote it and write it into a new location.
+- **Existing data cannot be opened.** Locations written by kv0 0.1.0-beta.2 and earlier (Lance
+  datasets), and by unreleased builds of `main` that used the Delta Lake (delta-rs) engine, are
+  recognised and refused with `NotSupported`, with a message to recreate them; they are never
+  modified. I chose not to ship a migration while kv0 is in beta: read the data with the build
+  that wrote it and write it into a new location. A view snapshot (`view.snap`) left by those
+  builds is ignored and rebuilt.
 - Only the latest version and tagged versions are readable. Tags are moraine pins;
   `versions()` lists the latest and tagged versions, and opening any other version fails with
   `NotFound`.
@@ -25,9 +28,22 @@ All notable changes to this project are documented here. The format follows
   files it removes from the log; its report's `versions_removed` now counts the data files erased.
 - The `engine` option and `KV0_ENGINE` accept only `moraine`, which is also the default.
 - Locations are local paths, `memory://` and `s3://` (including S3-compatible servers). `gs://`
-  and `az://` fail with `NotSupported` until moraine supports them; the `gcp` and `azure` cargo
-  features remain but enable nothing usable yet.
+  and `az://` fail with `NotSupported` until moraine supports them.
+- The `aws`, `gcp` and `azure` cargo features enable nothing: S3 is always built in, and Google
+  Cloud Storage and Azure are not supported yet. I kept the names, and the defaults, so that
+  builds that select them keep compiling. S3 credentials come from `storage_options` and the
+  `AWS_*` environment variables; AWS profiles and SSO sessions are not read.
+- Errors from moraine map onto kv0's: a held maintenance lease is a `Conflict`; a write that the
+  table's commit task dropped while its runtime shut down (nothing was written, so it can be
+  retried), a timeout, throttling or an unknown commit outcome is an I/O error (`StoreIOError` in
+  Python); a corrupt log, pin or lease record is `Corruption`.
 - A tracking flush is four commits, one per table; a reader can see a flush partly applied.
+- A key-value compaction or purge streams the rewritten rows into moraine one chunk at a time
+  instead of holding them all in memory.
+- A purge waits briefly before it erases (25 ms on local disk, 1.1 s on S3), so that files the
+  purge's own rewrite just removed are older than the store's clock and are erased too.
+- `purge` waits up to 5.5 minutes (was 2) for another client's purge, longer than the purge
+  lease, so the lease of a purger that died expires before it gives up.
 - Minimum Rust version 1.95. Arrow and Parquet 59. Building no longer needs `protoc`.
 - `orphan_grace` and `mark_prune_interval` are accepted and ignored: moraine keeps unreferenced
   files for its own grace period, and writer marks are no longer rows.
