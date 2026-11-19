@@ -64,13 +64,12 @@ jobs:
           "
 
   cargo:
-    name: cargo add (Rust 1.94.1)
+    name: cargo add (Rust 1.95)
     runs-on: ubuntu-latest
     steps:
-      - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libprotobuf-dev
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
-          toolchain: 1.94.1
+          toolchain: 1.95.0
       - name: Build a project that depends on the release
         env:
           TAG: ${{ inputs.tag }}

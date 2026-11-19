@@ -14,7 +14,6 @@ on:
   pull_request:
     paths:
       - .github/workflows/release.yml
-      - .github/scripts/install-protoc.sh
   workflow_dispatch:
     inputs:
       tag:
@@ -76,13 +75,10 @@ jobs:
         with:
           ref: ${{ needs.tag.outputs.ref }}
           persist-credentials: false
-      - if: runner.os == 'macOS'
-        run: brew install protobuf
       - uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
         with:
           target: ${{ matrix.target }}
           manylinux: ${{ matrix.manylinux || 'auto' }}
-          before-script-linux: .github/scripts/install-protoc.sh
           args: --release --strip --out dist
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
