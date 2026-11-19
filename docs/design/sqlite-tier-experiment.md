@@ -3,8 +3,10 @@
 > **Status: rejected.** This is the evidence record for the decision in
 > [DESIGN.md](../../DESIGN.md) ("Alternatives I rejected"). I built the tier as an experiment and
 > did not merge it; it is not part of kv0. kv0 keeps the native design: the
-> in-memory ordered view, the local write-ahead log and Lance. Links below to `REPORT.md` refer to
-> `bench/REPORT.md`.
+> in-memory ordered view and the local write-ahead log over a shared log in object storage. I ran
+> this experiment when kv0 stored its data with Lance, so every number here, and every mention of
+> Lance, is about that engine; kv0 now stores its data with moraine (a multi-writer database on
+> object storage using Delta Lake tables). Links below to `REPORT.md` refer to `bench/REPORT.md`.
 
 
 The same harness and machine as [REPORT.md](../../bench/REPORT.md) (i5-13500, NVMe RAID, Linux 6.12,
@@ -66,7 +68,7 @@ into 56 MB and milliseconds. Its throughput costs are real; the fixes, in order 
 be batched scans (read a page into a buffer with one statement
 and no per-row `Bytes` copies), group commit for single puts (one transaction per short interval
 instead of per call, durable on the same terms as `wal_sync="batch"`), and smaller Lance scan
-batches when building a cache. Without them, the in-memory view (rust-lance, the design kv0 ships) stays
+batches when building a cache. Without them, the in-memory view (rust-lance, the design kv0 ships, then on Lance) stays
 the faster choice for small databases that are written and read heavily in one process.
 
 
