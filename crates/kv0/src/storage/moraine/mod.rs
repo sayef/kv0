@@ -17,14 +17,13 @@
 //! - A key-value database is one moraine database with one table, `ops` (see [`kv`]).
 //! - Tags are moraine pins (see [`pins`]). moraine keeps no other old versions readable: a
 //!   handle reads the latest version, or a tagged one.
-//! - Maintenance is moraine's (compaction, checkpoints, log cleanup, vacuum on server time),
-//!   plus kv0's own removal of files that a version cleanup or a purge asks to go sooner than
-//!   moraine's grace period (see [`erase`]).
+//! - Maintenance is moraine's (compaction, checkpoints, log cleanup, vacuum on server time);
+//!   a version cleanup or a purge that asks files to go sooner than moraine's grace period runs
+//!   a moraine purge (see [`erase`]).
 
 pub(crate) mod erase;
 pub(crate) mod kv;
 pub(crate) mod pins;
-pub(crate) mod read;
 pub(crate) mod table;
 
 use std::sync::Arc;

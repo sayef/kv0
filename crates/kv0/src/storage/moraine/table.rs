@@ -7,7 +7,7 @@ use arrow_array_59::{Array as _, ArrayRef as ArrayRef59, ListArray as ListArray5
 use arrow_schema::SchemaRef;
 use arrow_schema_59::{DataType as DataType59, Field as Field59, Schema as Schema59};
 use futures::future::BoxFuture;
-use futures::{FutureExt, StreamExt, TryStreamExt};
+use futures::{FutureExt, StreamExt};
 
 use super::pins::Pins;
 use super::{error, wal_app_id, Repo};
@@ -120,6 +120,30 @@ fn renamed(a: &ArrayRef59, to: &DataType59) -> Result<ArrayRef59> {
     }
 }
 
+/// `batch` (kv0's logical columns) as moraine takes it for a table of schema `schema`: list
+/// columns with the item field named as the table names it.
+fn stored(schema: &Schema59, batch: &RecordBatch) -> Result<arrow_array_59::RecordBatch> {
+    let b = to_59(batch)?;
+    let mut fields = Vec::with_capacity(b.num_columns());
+    let mut cols = Vec::with_capacity(b.num_columns());
+    for (f, c) in b.schema().fields().iter().zip(b.columns()) {
+        match schema.field_with_name(f.name()) {
+            Ok(t) if t.data_type() != f.data_type() => {
+                cols.push(renamed(c, t.data_type())?);
+                fields.push(f.as_ref().clone().with_data_type(t.data_type().clone()));
+            }
+            _ => {
+                cols.push(c.clone());
+                fields.push(f.as_ref().clone());
+            }
+        }
+    }
+    Ok(arrow_array_59::RecordBatch::try_new(
+        Arc::new(Schema59::new(fields)),
+        cols,
+    )?)
+}
+
 /// A table version: the moraine table and the snapshot this handle reads.
 #[derive(Clone)]
 struct MoraineTable {
@@ -139,28 +163,9 @@ fn merge_policy() -> moraine::CompactionPolicy {
 }
 
 impl MoraineTable {
-    /// `batch` (Arrow 58, kv0's logical columns) as moraine takes it for this table.
+    /// `batch` (kv0's logical columns) as moraine takes it for this table.
     fn to_stored(&self, batch: &RecordBatch) -> Result<arrow_array_59::RecordBatch> {
-        let b = to_59(batch)?;
-        let schema = self.snap.schema();
-        let mut fields = Vec::with_capacity(b.num_columns());
-        let mut cols = Vec::with_capacity(b.num_columns());
-        for (f, c) in b.schema().fields().iter().zip(b.columns()) {
-            match schema.field_with_name(f.name()) {
-                Ok(t) if t.data_type() != f.data_type() => {
-                    cols.push(renamed(c, t.data_type())?);
-                    fields.push(f.as_ref().clone().with_data_type(t.data_type().clone()));
-                }
-                _ => {
-                    cols.push(c.clone());
-                    fields.push(f.as_ref().clone());
-                }
-            }
-        }
-        Ok(arrow_array_59::RecordBatch::try_new(
-            Arc::new(Schema59::new(fields)),
-            cols,
-        )?)
+        stored(&self.snap.schema(), batch)
     }
 
     fn pins(&self) -> Pins<'_> {
@@ -194,37 +199,32 @@ impl MoraineTable {
         to_expr(pred, &self.snap.schema())
     }
 
-    async fn read(&self, scan: Scan) -> Result<Vec<RecordBatch>> {
-        let all = self.snap.files();
+    /// moraine's scan for `scan`, at this handle's version. Chosen files that this version no
+    /// longer holds are skipped; the others are read in the version's file order.
+    fn moraine_scan(&self, scan: &Scan) -> moraine::Scan {
+        let mut s = self.snap.scan();
         if let Some(ids) = &scan.files {
-            // Chosen files only: read straight from their Parquet files, unless they are all.
             let wanted: std::collections::HashSet<&str> =
                 ids.iter().map(|f| f.0.as_str()).collect();
-            if wanted.len() != all.len() || all.iter().any(|f| !wanted.contains(f.path.as_str())) {
-                let files = all
+            s = s.files(
+                self.snap
+                    .files()
                     .into_iter()
                     .filter(|f| wanted.contains(f.path.as_str()))
-                    .collect();
-                let batches = super::read::files(
-                    &self.repo,
-                    &self.moraine,
-                    &self.snap.schema(),
-                    files,
-                    scan.filter.as_ref(),
-                    scan.columns.as_deref(),
-                )
-                .await?;
-                return batches.iter().map(from_59).collect();
-            }
+                    .map(|f| f.path),
+            );
         }
-        let mut s = self.snap.scan();
         if let Some(p) = &scan.filter {
             s = s.filter(self.expr(p));
         }
         if let Some(c) = &scan.columns {
             s = s.select(c.iter().copied());
         }
-        let batches = s.collect().await.map_err(error)?;
+        s
+    }
+
+    async fn read(&self, scan: Scan) -> Result<Vec<RecordBatch>> {
+        let batches = self.moraine_scan(&scan).collect().await.map_err(error)?;
         batches.iter().map(from_59).collect()
     }
 }
@@ -283,8 +283,8 @@ impl Table for MoraineTable {
 
     fn scan_stream(&self, scan: Scan) -> BoxFuture<'_, Result<BatchStream>> {
         async move {
-            let batches = self.read(scan).await?;
-            Ok(futures::stream::iter(batches.into_iter().map(Ok::<_, Error>)).boxed())
+            let s = self.moraine_scan(&scan).stream();
+            Ok(s.map(|b| from_59(&b.map_err(error)?)).boxed())
         }
         .boxed()
     }
@@ -397,29 +397,50 @@ impl Table for MoraineTable {
         tag: Option<FileTag>,
     ) -> BoxFuture<'_, Result<()>> {
         async move {
-            let batches: Vec<RecordBatch> = source.try_collect().await?;
-            let stored = batches
-                .iter()
-                .filter(|b| b.num_rows() > 0)
-                .map(|b| self.to_stored(b))
-                .collect::<Result<Vec<_>>>()?;
+            // The rows are written as they are read (moraine D68). An error of the source is
+            // kept as it is, so a caller still tells a missing file from other failures.
+            let failed: Arc<parking_lot::Mutex<Option<Error>>> = Arc::default();
+            let schema = self.snap.schema();
+            let slot = failed.clone();
+            let rows = source.filter_map(move |b| {
+                let b = b.and_then(|b| match b.num_rows() {
+                    0 => Ok(None),
+                    _ => stored(&schema, &b).map(Some),
+                });
+                let out = match b {
+                    Ok(b) => b.map(Ok),
+                    Err(e) => {
+                        let m = e.to_string();
+                        *slot.lock() = Some(e);
+                        Some(Err(moraine::Error::Io(std::io::Error::other(format!(
+                            "reading the rows of a replace: {m}"
+                        )))))
+                    }
+                };
+                futures::future::ready(out)
+            });
             let mut r = moraine::Replace::new()
                 .remove_all(remove.into_iter().map(|f| f.0))
-                .add_rows(stored);
+                .add_stream(rows);
             // moraine keeps tags per file: the files kept (`tag.keep`) carry theirs already.
             if let Some(t) = &tag {
                 r = r.tag(t.key, "1");
             }
-            self.table.replace_files(r).await.map_err(error)?;
+            let replaced = self.table.replace_files(r).await;
+            if let Some(e) = failed.lock().take() {
+                return Err(e);
+            }
+            replaced.map_err(error)?;
             self.after_commit();
             Ok(())
         }
         .boxed()
     }
 
-    /// Files whose moraine tags hold `key`. A tagged file that compaction or a delete replaced
-    /// is not noticed (`lost` stays false); the statistics fold finds its rows by their exact
-    /// statistics instead.
+    /// Files whose moraine tags hold `key`. moraine's compaction keeps a file's tags: it merges
+    /// only files whose tags are equal, and the merged file carries them (moraine D68). A
+    /// tagged file that a delete rewrote loses its tag unnoticed (`lost` stays false); the
+    /// statistics fold finds its rows by their exact statistics instead.
     fn tagged(&self, key: &'static str) -> Tagged {
         Tagged {
             files: self
@@ -445,8 +466,7 @@ impl Table for MoraineTable {
     }
 
     fn cleanup(&self, c: crate::storage::Cleanup) -> BoxFuture<'_, Result<(u64, u64)>> {
-        async move { super::erase::cleanup(&self.repo, &self.table, &self.moraine, c).await }
-            .boxed()
+        async move { super::erase::cleanup(&self.table, c).await }.boxed()
     }
 
     /// kv0's cleanup cadence also brings moraine's checkpoints and vacuum (see `erase`).

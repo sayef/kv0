@@ -5,6 +5,7 @@
 pub(crate) mod filter;
 pub(crate) mod footer_cache;
 pub(crate) mod scan;
+#[cfg(feature = "delta")]
 pub(crate) mod take;
 
 /// Whether `e` (or one of its sources) is a missing object or file.

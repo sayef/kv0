@@ -8,9 +8,10 @@
 //!
 //! A row address is `file ordinal << 32 | row ordinal`, as on the Delta engine: file ordinals
 //! index a table of the files this handle met, which only grows and which the view snapshot
-//! saves; row ordinals are positions in a file. moraine's data files are plain Parquet that
-//! never change, so kv0 scans chosen files and fetches values by row ordinal from them directly
-//! (moraine's own scans cover a whole version and number no rows).
+//! saves, keyed by the table's id and the file's path; row ordinals are positions in a file.
+//! moraine's data files are plain Parquet that never change, so kv0 scans them file by file
+//! itself, numbering the rows; values are fetched by row ordinal through moraine
+//! (`TableSnapshot::take`, moraine D67).
 //!
 //! - An append carries its writer's mark as a moraine transaction id, `kv0-wal/<writer id>`
 //!   at the writer's highest sequence number, so a replayed append lands at most once.
@@ -40,7 +41,6 @@ use crate::kv::view::{Op, SnapChunk, OP_MARK, OP_PUT};
 use crate::kv::VersionInfo;
 use crate::storage::files::footer_cache::FooterCache;
 use crate::storage::files::scan::{self, ScanFile};
-use crate::storage::files::take;
 use crate::storage::format::Kind;
 use crate::storage::oplog::{Columns, FileId, Log, LogFile, OpLog, RawRow, Sink, WriterMark};
 use crate::storage::types::{seq_from_i64, seq_to_i64};
@@ -124,33 +124,34 @@ struct Shared {
     files: Mutex<FileTable>,
 }
 
-/// File ordinals of row addresses: `(path, size)` by ordinal.
+/// File ordinals of row addresses: `(path, size)` by ordinal, and the ordinals by table id and
+/// path (a table created again at the same location has another id).
 #[derive(Default)]
 struct FileTable {
-    ords: HashMap<String, u32>,
+    ords: HashMap<(String, String), u32>,
     files: Vec<(String, u64)>,
 }
 
 impl Shared {
-    fn ord(&self, path: &str, size: u64) -> u32 {
+    fn ord(&self, table_id: &str, path: &str, size: u64) -> u32 {
         let mut t = self.files.lock();
-        if let Some(o) = t.ords.get(path) {
+        let key = (table_id.to_string(), path.to_string());
+        if let Some(o) = t.ords.get(&key) {
             return *o;
         }
         let o = t.files.len() as u32;
         t.files.push((path.to_string(), size));
-        t.ords.insert(path.to_string(), o);
+        t.ords.insert(key, o);
         o
     }
 
-    fn file(&self, ord: u32) -> Option<ScanFile> {
-        let t = self.files.lock();
-        let (p, s) = t.files.get(ord as usize)?;
-        Some(ScanFile {
-            ord,
-            path: super::read::data_path(&self.repo, TABLE, p),
-            size: *s,
-        })
+    /// The path of the file with ordinal `ord`.
+    fn path(&self, ord: u32) -> Option<String> {
+        self.files
+            .lock()
+            .files
+            .get(ord as usize)
+            .map(|f| f.0.clone())
     }
 
     fn pins(&self) -> Pins<'_> {
@@ -160,6 +161,11 @@ impl Shared {
             name: TABLE,
         }
     }
+}
+
+/// The location of data file `path` of the table.
+fn data_path(repo: &Repo, path: &str) -> object_store::path::Path {
+    repo.path(&format!("{TABLE}/data/{path}"))
 }
 
 fn addr(ord: u32, row: u64) -> u64 {
@@ -200,31 +206,50 @@ impl MoraineLog {
         Arc::new(MoraineLog::new(self.shared.clone(), snap, written))
     }
 
+    fn ord(&self, f: &moraine::SnapshotFile) -> u32 {
+        self.shared.ord(self.snap.table_id(), &f.path, f.size)
+    }
+
     fn scan_file(&self, f: &moraine::SnapshotFile) -> ScanFile {
         ScanFile {
-            ord: self.shared.ord(&f.path, f.size),
-            path: super::read::data_path(&self.shared.repo, TABLE, &f.path),
+            ord: self.ord(f),
+            path: data_path(&self.shared.repo, &f.path),
             size: f.size,
         }
     }
 
-    /// The values at `addrs`, read file by file (files in parallel).
+    /// The values at `addrs`, read file by file (files in parallel). A file this version no
+    /// longer holds reads as missing ([`Error::NotFound`]), so the caller refreshes.
     async fn take_values(&self, addrs: &[u64]) -> Result<Vec<Bytes>> {
         let mut by_file: HashMap<u32, Vec<usize>> = HashMap::new();
         for (i, a) in addrs.iter().enumerate() {
             by_file.entry((a >> 32) as u32).or_default().push(i);
         }
-        let store = self.shared.repo.store().clone();
         let reads = by_file.into_iter().map(|(ord, idx)| {
-            let store = store.clone();
-            let footers = self.shared.footers.clone();
-            let file = self.shared.file(ord);
+            let path = self.shared.path(ord);
             let rows: Vec<u64> = idx.iter().map(|i| addrs[*i] & 0xffff_ffff).collect();
             async move {
-                let file = file.ok_or_else(|| {
+                let path = path.ok_or_else(|| {
                     Error::Corruption(format!("row address names unknown file {ord}"))
                 })?;
-                let got = take::take(store, &footers, &file, &rows, "value").await?;
+                let got = self
+                    .snap
+                    .take(&path, &rows)
+                    .select(["value"])
+                    .collect()
+                    .await
+                    .map_err(|e| match e {
+                        moraine::Error::FilesChanged(p) => Error::NotFound(format!(
+                            "data file {p} is no longer part of version {}",
+                            self.snap.version()
+                        )),
+                        e => error(e),
+                    })?;
+                let values = binary(&got, "value")?;
+                // A null reads as empty.
+                let got: Vec<Bytes> = (0..values.len())
+                    .map(|i| Bytes::copy_from_slice(values.value(i)))
+                    .collect();
                 Ok::<_, Error>((idx, got))
             }
         });
@@ -419,7 +444,7 @@ impl OpLog for MoraineLog {
             // keeps their order); otherwise the reader finds out by reading.
             let written = match added.as_slice() {
                 [f] if f.rows == Some(ops.len() as u64) => {
-                    let ord = this.shared.ord(&f.path, f.size);
+                    let ord = this.shared.ord(snap.table_id(), &f.path, f.size);
                     Some(Arc::new(
                         ops.iter()
                             .enumerate()
@@ -567,8 +592,7 @@ impl OpLog for MoraineLog {
     }
 
     fn cleanup(&self, c: crate::storage::Cleanup) -> BoxFuture<'_, Result<(u64, u64)>> {
-        async move { super::erase::cleanup(&self.shared.repo, &self.shared.table, TABLE, c).await }
-            .boxed()
+        async move { super::erase::cleanup(&self.shared.table, c).await }.boxed()
     }
 
     /// kv0's cleanup cadence also brings moraine's checkpoints and vacuum (see `erase`).
@@ -600,6 +624,11 @@ impl OpLog for MoraineLog {
         futures::future::ready(Ok(v)).boxed()
     }
 
+    /// The table's id (moraine D67): a database deleted and created again gets a new one.
+    fn log_id(&self) -> String {
+        self.snap.table_id().to_string()
+    }
+
     fn addr_table(&self) -> Vec<String> {
         self.shared
             .files
@@ -611,6 +640,7 @@ impl OpLog for MoraineLog {
     }
 
     fn restore_addr_table(&self, entries: Vec<String>) {
+        let id = self.snap.table_id().to_string();
         let mut t = self.shared.files.lock();
         if !t.files.is_empty() {
             return;
@@ -622,7 +652,8 @@ impl OpLog for MoraineLog {
             let Ok(size) = s.parse::<u64>() else { continue };
             let o = t.files.len() as u32;
             t.files.push((p.to_string(), size));
-            t.ords.insert(p.to_string(), o);
+            // Restored only for a log of the same id (`log_id`), which is this one.
+            t.ords.insert((id.clone(), p.to_string()), o);
         }
     }
 
