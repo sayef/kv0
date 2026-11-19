@@ -53,12 +53,12 @@ cursor made before the next chunk is read are seen.
 ## Durability and visibility
 
 - Writes are visible to the handle immediately.
-- They are **committed** (one Lance version per commit) when the buffer is full, every `flush_interval`,
+- They are **committed** (one version per commit) when the buffer is full, every `flush_interval`,
   on `flush()` / `flush_wal()` / `compact_range()`, on `sync=True` writes and on `close()`.
 - Before a write returns it is appended to a local write-ahead log. If the process crashes, the next
   writable open of the same database **on the same machine** replays the writes that were not
   committed, then commits them. With `wal_sync="batch"` (default) a power loss can lose the last
-  ~100 ms; use `"always"` to fsync every write, or `sync=True` to commit it to Lance.
+  ~100 ms; use `"always"` to fsync every write, or `sync=True` to commit it to storage.
 - If the machine itself is lost, writes since the last commit are lost with it.
 - `disable_wal=True` on `put`, `delete`, `delete_range` or `write` skips the log for that write:
   it is committed with the next flush, and lost if the process crashes before then.
@@ -71,10 +71,14 @@ cursor made before the next chunk is read are seen.
 ```python
 db.version                         # the version this handle has read
 db.versions()                      # [(version, commit time in µs since the epoch, UTC), ...]
-kv0.DB(path, version=3)       # read-only view of version 3
-db.cleanup_old_versions(86400)     # delete versions older than a day; returns bytes removed
+db.create_tag('v3')                # keep this handle's version readable
+kv0.DB(path, version=db.tag_version('v3'))   # read-only view of the tagged version
+db.cleanup_old_versions(86400)     # collect files of versions older than a day; returns bytes removed
 db.stats()                         # live keys, buffered writes, files, stored rows
 ```
+
+Only the latest version and tagged versions are readable: `versions()` lists those, and opening
+any other version fails with `errors.NotFound`. Tag a version to read it later.
 
 Values over `lazy_value_threshold` are read from the version a handle last loaded. If another
 process compacts and then cleans up that version, the handle's next read of such a value refreshes

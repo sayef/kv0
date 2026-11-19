@@ -6,6 +6,40 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- kv0 now stores everything with [moraine](https://github.com/sayef/moraine) (the `morainedb`
+  crate), a client-only database of Delta Lake tables on object storage, and it is the only
+  storage engine. A key-value database is a moraine database with one table; a tracking
+  repository is one moraine database with a table per kv0 table. Each commit is one conditional
+  write of a log entry, and a write-ahead log replays exactly once through moraine transaction
+  ids.
+- Locations written by kv0 0.1.0-beta.2 and earlier (Lance datasets) are recognised and refused
+  with `NotSupported`, with a message to recreate them. I chose not to ship a migration while kv0
+  is in beta: read the data with the release that wrote it and write it into a new location.
+- Only the latest version and tagged versions are readable. Tags are moraine pins;
+  `versions()` lists the latest and tagged versions, and opening any other version fails with
+  `NotFound`.
+- `cleanup_old_versions` and the automatic cleanup after `version_retention` run a moraine purge:
+  files removed before the cutoff are deleted at once. `purge` also erases the statistics of the
+  files it removes from the log; its report's `versions_removed` now counts the data files erased.
+- The `engine` option and `KV0_ENGINE` accept only `moraine`, which is also the default.
+- Locations are local paths, `memory://` and `s3://` (including S3-compatible servers). `gs://`
+  and `az://` fail with `NotSupported` until moraine supports them; the `gcp` and `azure` cargo
+  features remain but enable nothing usable yet.
+- A tracking flush is four commits, one per table; a reader can see a flush partly applied.
+- Minimum Rust version 1.95. Arrow and Parquet 59. Building no longer needs `protoc`.
+- `orphan_grace` and `mark_prune_interval` are accepted and ignored: moraine keeps unreferenced
+  files for its own grace period, and writer marks are no longer rows.
+
+### Removed
+
+- The Lance engine and the Delta Lake (delta-rs) engine.
+- `kv0 migrate`, the `lance-migrate` cargo feature, the `kv0` binary that carried it, the
+  `kv0-migrate` Python package and `kv0.migrate()`.
+- Reading the shared `records.lance` of builds before per-table records: no moraine repository
+  has one, so `legacy_records()` is always empty and `drop_legacy_records()` returns `False`.
+
 ## [0.1.0-beta.2](https://github.com/sayef/kv0/compare/v0.1.0-beta.1...v0.1.0-beta.2) - 2026-11-12
 
 ### Added

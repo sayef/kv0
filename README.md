@@ -1,13 +1,13 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="assets/banner-dark.png">
-    <img alt="kv0: an ordered key-value store on Lance, on any object store" src="assets/banner-light.png" width="640">
+    <img alt="kv0: an ordered key-value store on object storage" src="assets/banner-light.png" width="640">
   </picture>
 </p>
 
 <p align="center">
-  <b>An ordered key-value store and experiment-tracking tables on Lance.</b><br>
-  One embedded engine for a local disk, S3, Google Cloud Storage and Azure, from Rust and Python.
+  <b>An ordered key-value store and experiment-tracking tables on object storage.</b><br>
+  One embedded engine for a local disk and S3, from Rust and Python, built on moraine.
 </p>
 
 <p align="center">
@@ -27,21 +27,26 @@ tracker's data on the same storage.
 
 ## Why kv0
 
-- **One engine on every backend.** Data is a [Lance](https://lance.org) dataset, so the same code
-  runs on a laptop and straight on a bucket. No sync daemon, no storage protocol of its own.
+- **One engine on every backend.** Data lives in Delta Lake tables written by
+  [moraine](https://github.com/sayef/moraine), so the same code runs on a laptop and straight on a
+  bucket. No sync daemon, no server, no commit protocol of its own.
 - **Several writers, no coordinator.** Processes on one machine or many append at once; every
-  commit is an atomic, versioned Lance commit, and any version can be opened again.
+  commit is one conditional write of a log entry, and tagged versions can be opened again.
 - **A write survives a killed process.** It is in a local write-ahead log before the call returns,
   and the next open replays what was not committed yet.
 - **Memory and open time stay bounded.** One compact entry per key in memory, values over 4 KiB
-  left in Lance, and a view snapshot that opens 10M keys in 0.7 s.
+  left in storage, and a view snapshot that opened 10M keys in 0.7 s (on the earlier Lance engine).
 - **Measured, regressions included.** Every number below links to its table and method.
+
+> kv0 now stores data with moraine only. Locations written by kv0 0.1.0-beta.2 and earlier (Lance)
+> cannot be opened and must be recreated; see
+> [Earlier formats](https://kv0.readthedocs.io/en/latest/guides/storage/#earlier-formats).
 
 ## Install
 
 ```sh
 pip install kv0          # Python 3.11+; until the first release: maturin develop --release
-cargo add kv0            # Rust; building needs protoc (protobuf-compiler, libprotobuf-dev)
+cargo add kv0            # Rust 1.95 or newer
 ```
 
 ## Quickstart
@@ -97,7 +102,8 @@ repo.metric(run.id, "loss", context={"subset": "train"}, start=900, stop=1000)
 ## Benchmarks
 
 One machine (i5-13500, NVMe), local disk, medians of five runs; a difference counts only when the
-ranges do not overlap and the medians differ by more than 20%.
+ranges do not overlap and the medians differ by more than 20%. These numbers were measured with
+kv0 0.1.0-beta.2, on the Lance engine it had then; measurements on moraine follow.
 
 | | Before the memory work | Now |
 |---|---:|---:|

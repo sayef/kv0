@@ -20,8 +20,7 @@ your process; several processes, on one machine or many, can open the same datab
     cargo add kv0
     ```
 
-    Building needs `protoc` with the well-known `.proto` includes, which Lance compiles against:
-    `apt install protobuf-compiler libprotobuf-dev` or `brew install protobuf`.
+    Building needs Rust 1.95 or newer; no system libraries or code generators.
 
 ## A key-value database
 
@@ -39,17 +38,19 @@ your process; several processes, on one machine or many, can open the same datab
 
 What happened:
 
-1. `DB(path)` created a Lance dataset at `path` (it would be `s3://bucket/prefix` on S3).
+1. `DB(path)` created a database at `path` (it would be `s3://bucket/prefix` on S3): a
+   moraine database with one Delta Lake table of operations.
 2. The batch was logged to a local write-ahead log, applied to the in-memory view (so `get` sees it
    at once), and buffered.
-3. `flush()` committed the buffer as one Lance version; `close()` would have done the same.
+3. `flush()` committed the buffer as one version; `close()` would have done the same.
 
 ## Open the same database elsewhere
 
 ```python
 reader = kv0.DB(path, read_only=True)       # another process, or another machine on S3
 reader.get(b'key_1')                        # sees every committed write; refreshes every second
-old = kv0.DB(path, version=1)               # a read-only view of an earlier version
+db.create_tag('v1')                         # keep this handle's version readable
+old = kv0.DB(path, version=db.tag_version('v1'))   # read-only, at the tagged version
 ```
 
 ## A tracking repository
@@ -62,5 +63,5 @@ old = kv0.DB(path, version=1)               # a read-only view of an earlier ver
 
 - [Concepts](concepts.md): ordering, batches, iterators, durability, versions and writers.
 - [Key-value API](guides/key-value.md) and [tracking tables](guides/tracking.md).
-- [Storage backends](guides/storage.md): S3, GCS, Azure and `storage_options`.
+- [Storage backends](guides/storage.md): S3 and S3-compatible stores, and `storage_options`.
 - [Operations and cleanup](guides/operations.md) before you run it in production.

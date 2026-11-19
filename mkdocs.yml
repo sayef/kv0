@@ -1,5 +1,5 @@
 site_name: kv0
-site_description: "An ordered key-value store and experiment-tracking tables on Lance, on any object store."
+site_description: "An ordered key-value store and experiment-tracking tables on object storage, built on moraine."
 site_url: !ENV [READTHEDOCS_CANONICAL_URL, 'https://kv0.readthedocs.io/en/latest/']
 repo_url: https://github.com/sayef/kv0
 repo_name: sayef/kv0
@@ -90,7 +90,6 @@ nav:
       - Tracking tables: guides/tracking.md
       - Configuration: guides/configuration.md
       - Operations and cleanup: guides/operations.md
-      - Migrating to Delta Lake: guides/migration.md
   - Benchmarks: benchmarks.md
   - Design:
       - Design and guarantees: design.md

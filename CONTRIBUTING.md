@@ -11,10 +11,9 @@ Thanks for your interest in kv0. Bug reports, benchmarks, documentation fixes an
 
 ## Development setup
 
-You need Rust 1.94.1 or newer (the minimum supported version, checked in CI), `protoc` with the
-well-known `.proto` includes (Lance needs it at build time: `apt install protobuf-compiler libprotobuf-dev`
-or `brew install protobuf`) and, for the Python bindings, Python 3.11+ with [uv](https://docs.astral.sh/uv/)
-and [maturin](https://www.maturin.rs/).
+You need Rust 1.95 or newer (the minimum supported version, checked in CI; no `protoc` or other
+system tools) and, for the Python bindings, Python 3.11+ with [uv](https://docs.astral.sh/uv/) and
+[maturin](https://www.maturin.rs/).
 
 ```sh
 git clone https://github.com/sayef/kv0 && cd kv0
@@ -25,32 +24,15 @@ uv run --no-sync maturin develop --release
 uv run --no-sync pytest
 ```
 
-The key-value and tracking layers also run on a Delta Lake engine (delta-rs without DataFusion),
-behind the `delta` feature, which needs Rust 1.95 or newer. New databases and repositories use it
-when `KV0_TEST_BACKEND=delta` is set; existing ones keep the engine they were created with. CI runs
-the Rust and Python suites both ways:
+kv0 has one storage engine, [moraine](https://github.com/sayef/moraine) (the `morainedb` crate).
 
-```sh
-KV0_TEST_BACKEND=delta cargo test -p kv0 --features delta
-uv run --no-sync maturin develop --features delta && KV0_TEST_BACKEND=delta uv run --no-sync pytest
-```
-
-The migration from Lance (`kv0 migrate`, `crates/kv0/src/migrate.rs`) is behind the
-`lance-migrate` feature, which includes `delta`; its Python package `kv0-migrate` lives in
-`crates/kv0-migrate-py` (built and tested in CI, not published yet):
-
-```sh
-cargo test -p kv0 --features lance-migrate --test migrate
-uv run --no-sync maturin develop -m crates/kv0-migrate-py/Cargo.toml
-uv run --no-sync pytest crates/kv0-migrate-py/tests
-```
-
-`tests/chaos.rs` is the Delta engine's concurrency and crash suite: processes writing, compacting,
-deleting, optimizing, cleaning up and purging at once, object-store faults (`kv0::testing`), and
-crashes at every write of a flush, each checked against a model of the acknowledged writes. Every
-test prints its seed; `KV0_CHAOS_SEED=<seed>` repeats the same random choices (up to thread
-timing) and `KV0_CHAOS_SCALE=<n>` multiplies the work. Pull requests run it at scale 1; the
-`Chaos` workflow runs it nightly with larger scales and new seeds (report-only).
+`tests/chaos.rs` is the concurrency and crash suite: processes writing, compacting, deleting,
+optimizing, cleaning up and purging at once, object-store faults (`kv0::testing`), and crashes at
+every write of a flush, each checked against a model of the acknowledged writes; `tests/moraine.rs`
+adds tracking writers racing deletes and readers, crashes between the four commits of a flush and
+lost commit responses. Every test prints its seed; `KV0_CHAOS_SEED=<seed>` repeats the same random
+choices (up to thread timing) and `KV0_CHAOS_SCALE=<n>` multiplies the work. Pull requests run it at
+scale 1; the `Chaos` workflow runs it nightly with larger scales and new seeds (report-only).
 
 Object-store tests run against any S3-compatible server. CI starts RustFS in Docker:
 
@@ -73,7 +55,7 @@ uv run mkdocs build --strict      # what CI runs: no warnings allowed
 
 - `crates/kv0`: the library. `src/kv` is the key-value layer (`view.rs` the in-memory ordered view,
   `store.rs` reading the operation log), `src/tracking` the tracking tables, `src/storage` locations,
-  object-store options and the storage engines (`oplog.rs` and `table.rs` the interfaces, `pred.rs` filters, `lance/` the Lance engine, `delta/` the Delta Lake engine: `kv.rs` the key-value log, `rows.rs` the tracking and records tables, `filter.rs` predicates without a query engine), `src/rt.rs` the Tokio runtime behind the blocking APIs.
+  object-store options and the storage engine (`oplog.rs` and `table.rs` the interfaces, `pred.rs` filters, `format.rs` the format marker and detection, `moraine/` the moraine engine: `kv.rs` the key-value log, `table.rs` the tracking and records tables, `pins.rs` tags as pins, `erase.rs` cleanup and purge), `src/rt.rs` the Tokio runtime behind the blocking APIs.
 - `crates/kv0-py`: the Python bindings (PyO3), the pure-Python package in `python/kv0`, typed stubs
   and the Python tests.
 - `bench/`: the evaluation harness (`bench/eval/`), the key-value comparison with the SQLite-cache
@@ -99,13 +81,13 @@ pre-commit installs its own copies of ruff, typos, actionlint and zizmor, at the
 | --- | --- | --- |
 | Whitespace, YAML, TOML, merge markers | trailing whitespace, final newlines, line endings | pre-commit |
 | gitleaks | secrets in the tree (CI scans the whole history) | pre-commit |
-| `cargo fmt`, `cargo clippy` | Rust formatting and lints, warnings as errors | pre-commit, or `cargo fmt --all --check` and `cargo clippy --workspace --all-targets -- -D warnings` (CI also with `--features kv0/delta`) |
+| `cargo fmt`, `cargo clippy` | Rust formatting and lints, warnings as errors | pre-commit, or `cargo fmt --all --check` and `cargo clippy --workspace --all-targets -- -D warnings` |
 | ruff | Python lints and formatting | pre-commit, or `uv run --no-sync ruff check` and `uv run --no-sync ruff format --check` |
 | typos | spelling in code and docs; exclusions and allowed words in `_typos.toml` | pre-commit, or `uvx typos` |
 | actionlint, zizmor | GitHub Actions workflows: correctness and security | pre-commit, or `uvx zizmor --offline .github` |
 | `cargo machete` | unused Rust dependencies (CI only) | `cargo install cargo-machete && cargo machete` |
 | `cargo deny check` | licences, advisories and sources (CI only) | `cargo install cargo-deny && cargo deny check` |
-| Tests, MSRV, docs | Rust and Python tests, Rust 1.94.1 (1.95.0 with `delta`), `mkdocs build --strict` | see the sections above |
+| Tests, MSRV, docs | Rust and Python tests, Rust 1.95.0, `mkdocs build --strict` | see the sections above |
 
 The benchmark outputs (`bench/results/*.json`, `bench/eval/charts/*.svg`, `bench/REPORT.md`) are generated,
 but they pass the same whitespace hooks: regenerate them rather than editing them by hand. If ruff and

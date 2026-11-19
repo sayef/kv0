@@ -6,7 +6,7 @@ What to watch and what to run when kv0 holds data you care about.
 
 | What | Where | Lost when |
 |---|---|---|
-| Committed data and every version | The dataset (path or URI) | You delete it, or cleanup removes old versions |
+| Committed data, the latest and tagged versions | The database or repository (path or URI) | You delete it; files only untagged older versions use go with cleanup and purge |
 | Writes not yet committed | The write-ahead log under `wal_dir` (`~/.cache/kv0/wal`) | The machine is lost |
 | View snapshots (`view.snap`) | Next to the write-ahead log | Never needed: a missing or stale snapshot means a full scan on open |
 
@@ -23,22 +23,22 @@ last `drop`. A killed process loses nothing: the next writable open on the machi
 
 Each commit adds a file. kv0 compacts automatically above `max_fragments` small files. Run it on
 demand with `compact_range()` (Python) / `compact()` (Rust) for the key-value store and
-`optimize()` for tracking, which also sorts metric points by series and step and builds the
-series index.
+`optimize()` for tracking, which also sorts metric points by series and step, folds runs and
+records, and runs moraine's upkeep (checkpoint, log cleanup, vacuum).
 
 ## Cleanup safety
 
-Compaction rewrites rows into new files; the old ones stay until their versions are cleaned up,
-automatically after `version_retention` (7 days) or on `cleanup_old_versions(age)`.
+Compaction rewrites rows into new files; the old ones stay until moraine's vacuum collects them
+after its grace period, or until a cleanup collects them at once: automatically for files removed
+more than `version_retention` (7 days) ago, or on `cleanup_old_versions(age)`.
 
 Other handles read values over `lazy_value_threshold` from the version they last loaded. If a
 cleanup deletes that version's files, the handle's next read refreshes and reads the value again
 from the new version: correct, but it costs a refresh, and it fails if the handle cannot refresh
 (a handle opened at a fixed `version`). Keep the cleanup age above the longest a reader goes
-without refreshing: its `refresh_interval`, or the life of an iterator. Time-travel opens of a
-cleaned-up version fail.
+without refreshing: its `refresh_interval`, or the life of an iterator.
 
-Tagged versions are never cleaned up:
+Only the latest version and tagged versions are readable; tagged versions are never cleaned up:
 
 ```python
 db.create_tag('release-3')                 # this handle's version
@@ -54,8 +54,8 @@ soon; many files means commits are frequent relative to `max_fragments`.
 
 ## Several machines
 
-Writers on different machines need no coordination: Lance commits with conditional writes, which
-AWS S3 and current S3-compatible servers support. Each machine has its own write-ahead log. A
+Writers on different machines need no coordination: a commit is a conditional write of a log
+entry, which AWS S3 and current S3-compatible servers support. Each machine has its own write-ahead log. A
 machine that dies with uncommitted writes keeps them in its log until it opens the database again.
 
 ## Deletion and erasure
@@ -63,8 +63,9 @@ machine that dies with uncommitted writes keeps them in its log until it opens t
 Deleting and erasing are different steps.
 
 **Delete** (`delete_runs`, `DB.delete`, `delete_range`) makes data invisible at once. The bytes
-stay: deleted rows are marked in deletion files, older versions still reference the files that hold
-them, and time travel (`DB(path, version=n)`, `At::Version`, tags) can read them back.
+stay: files that still hold deleted rows remain until moraine's vacuum collects them after its
+grace period, tagged versions keep theirs, and the log keeps the statistics of those files
+(minimum and maximum column values).
 
 **Purge** removes them:
 
@@ -76,10 +77,14 @@ report = db.purge()            # key-value: deleted and overwritten values
 ```
 
 It rewrites every data file that holds deleted rows (the key-value store rewrites the database as
-its live view), then removes every version but the latest, the way `cleanup_old_versions(0)` would.
+its live view), then runs a moraine purge with erasure on every table: every data file that only
+untagged older versions use is deleted at once, and the statistics of those files are erased from
+the log, its older checkpoints and stale tag manifests. `fragments_rewritten` counts the files
+the key-value store rewrote (tracking deletes rewrite their files as they run, so it stays 0 there);
+`versions_removed` counts the data files erased.
 For tracking, it first deletes any rows a writer racing the delete committed afterwards.
 
-**Tags.** A tag keeps its version through cleanup. If a tag keeps a version that still holds data
+**Tags.** A tag keeps its version through cleanup and purge. If a tag keeps a version that still holds data
 purge would remove (rows of a deleted run; in the key-value store, any value that is not the live
 one now, deleted or overwritten), `purge` stops with an error naming the tag and changes nothing. Delete the tag, or call `purge(force=True)`, which deletes such tags and
 lists them in `tags_deleted`. Records tables are tagged one by one, so a tag on an evaluation
@@ -108,14 +113,14 @@ leave such a tag behind; the report lists it in `tags_left`, and a second purge 
 - **Memory of other handles.** Other open handles keep values they have read or cached until they
   refresh or close.
 
-**Concurrency.** Writers can keep writing during a purge: compaction and cleanup commit like any
-other writer, and Lance's cleanup never removes a file that no version references until it is
-7 days old, so a file a concurrent writer is about to commit is safe. (Such an unreferenced file,
-left by a writer that crashed before committing, is removed only by a cleanup after those 7 days.)
-With the Delta Lake engine (the `delta` feature) that age is `orphan_grace` (1 h): files a writer
-left less than that long before a purge are removed by a later cleanup (a writer deletes the files
-of a commit it knows did not land at once; a crash or an unanswered commit request leaves them). Files that a removed
-version committed are erased however recent they are. Readers that hold an
+**Concurrency.** Writers can keep writing during a purge: compaction and purge commit like any
+other writer. A file no commit references yet (a writer's upload for a commit in flight) is never
+taken by purge; moraine removes such a file only after its grace period, and a writer deletes the
+files of a commit it knows did not land at once. Only one purge runs on a table at a time: a
+version cleanup that finds another one running leaves the work to it, and `purge` waits for it
+(up to two minutes, then fails with `errors.Conflict`).
+Files that a removed version committed are erased however recent they are. Readers that hold an
 older version lose it: a key-value handle reading a value whose file is gone refreshes and reads it
-again; a tracking query in flight may fail and should be retried. Run `purge` when a short burst of
-reader refreshes is acceptable.
+again; a tracking query in flight may fail and should be retried. Erasure does not reach the
+memory of other processes (their footer and page caches) until they refresh or close. Run `purge`
+when a short burst of reader refreshes is acceptable.

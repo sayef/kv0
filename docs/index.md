@@ -1,7 +1,7 @@
 ---
 template: home.html
 title: kv0
-description: An ordered key-value store and experiment-tracking tables on Lance, on any object store.
+description: An ordered key-value store and experiment-tracking tables on object storage, built on moraine.
 hide:
   - navigation
   - toc
