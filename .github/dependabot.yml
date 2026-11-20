@@ -12,13 +12,16 @@ updates:
       rust:
         patterns: ["*"]
         update-types: [minor, patch]
-    # kv0 passes Arrow record batches to and from moraine, so Arrow and Parquet follow the major
-    # version morainedb builds with; they move together with moraine, not on their own.
+    # kv0 passes Arrow record batches and its object store to and from moraine, so Arrow, Parquet
+    # and object_store follow the versions morainedb builds with; they move together with moraine,
+    # not on their own. For object_store (0.x) a minor version is a breaking one.
     ignore:
       - dependency-name: "arrow*"
         update-types: ["version-update:semver-major"]
       - dependency-name: "parquet"
         update-types: ["version-update:semver-major"]
+      - dependency-name: "object_store"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
   - package-ecosystem: github-actions
     directory: /
     schedule:
