@@ -1,4 +1,4 @@
-//! A byte-bounded LRU cache of values read from Lance, keyed by row address.
+//! A byte-bounded LRU cache of values read from storage, keyed by row address.
 
 use std::collections::{BTreeMap, HashMap};
 

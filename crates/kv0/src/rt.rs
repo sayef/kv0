@@ -1,6 +1,6 @@
 //! A process-wide Tokio runtime for the blocking APIs.
 //!
-//! Lance is async. The key-value layer and the Python bindings are blocking, so they run their
+//! moraine is async. The key-value layer and the Python bindings are blocking, so they run their
 //! futures on this runtime and wait for the result. Spawning onto a dedicated runtime (instead of
 //! `Runtime::block_on`) means a blocking call never panics when the caller is itself inside a Tokio
 //! runtime; it only blocks the calling thread.
@@ -53,7 +53,7 @@ fn on_kv0_runtime() -> bool {
 
 /// Runs `fut` on the kv0 runtime and awaits it from any executor.
 ///
-/// The async APIs use this so that locks held across Lance I/O are only ever held by tasks on
+/// The async APIs use this so that locks held across storage I/O are only ever held by tasks on
 /// the kv0 runtime, never by a caller's (possibly single-threaded) runtime.
 pub async fn spawn<F>(fut: F) -> F::Output
 where

@@ -5,14 +5,12 @@
 //! stays the same for as long as the file is part of the table.
 
 use std::collections::HashSet;
-#[cfg(feature = "delta")]
 use std::sync::Arc;
 
 use arrow_array::RecordBatch;
 use arrow_schema::SchemaRef;
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
-use futures::FutureExt;
 
 use super::oplog::{FileId, WriterMark};
 use super::pred::Pred;
@@ -90,11 +88,10 @@ pub(crate) struct Tagged {
     pub lost: bool,
 }
 
-/// Tags the files [`Table::replace`] writes, and keeps the tag on `keep`. Other files lose it.
+/// Tags the files [`Table::replace`] writes. Files the replace keeps keep their own tags.
 #[derive(Clone, Debug)]
 pub(crate) struct FileTag {
     pub key: &'static str,
-    pub keep: HashSet<FileId>,
 }
 
 /// One version of a table in some storage engine.
@@ -131,45 +128,18 @@ pub(crate) trait Table: Send + Sync + 'static {
     /// Rows matching `filter` (all rows when `None`).
     fn count(&self, filter: Option<Pred>) -> BoxFuture<'_, Result<usize>>;
 
-    /// Appends `batches` in one commit. With `mark`, an engine that keeps writer marks itself
-    /// ([`Table::keeps_marks`]) commits the mark with the rows.
+    /// Appends `batches` in one commit. With `mark`, the writer's mark is committed with the
+    /// rows (a moraine transaction id), so a replayed append lands at most once.
     fn append(
         &mut self,
         batches: Vec<RecordBatch>,
         mark: Option<WriterMark>,
     ) -> BoxFuture<'_, Result<()>>;
 
-    /// Whether the engine keeps writer marks itself ([`Table::append`]); otherwise the caller
-    /// writes them as rows.
-    fn keeps_marks(&self) -> bool {
-        false
-    }
-
-    /// The highest sequence number `writer` committed to this table, as of this version, when
-    /// the engine keeps writer marks.
-    fn writer_mark<'a>(&'a self, _writer: &'a str) -> BoxFuture<'a, Result<Option<u64>>> {
-        async { Ok(None) }.boxed()
-    }
+    /// The highest sequence number `writer` committed to this table, as of this version.
+    fn writer_mark<'a>(&'a self, writer: &'a str) -> BoxFuture<'a, Result<Option<u64>>>;
 
     /// Adds the nullable columns of `added`, null in every existing row.
-    /// Commits writer marks alone, for a migration carrying over the source's marks.
-    #[cfg(feature = "lance-migrate")]
-    fn adopt_marks(&mut self, _marks: Vec<WriterMark>) -> BoxFuture<'_, Result<()>> {
-        async {
-            Err(crate::Error::NotSupported(
-                "this engine cannot be a migration's target".into(),
-            ))
-        }
-        .boxed()
-    }
-
-    /// When the latest version was committed (microseconds since the epoch), where the engine
-    /// records it: a migration refuses a source that writers are still committing to.
-    #[cfg(feature = "lance-migrate")]
-    fn last_commit_micros(&self) -> BoxFuture<'_, Result<Option<i64>>> {
-        async { Ok(None) }.boxed()
-    }
-
     fn add_columns(&mut self, added: SchemaRef) -> BoxFuture<'_, Result<()>>;
 
     /// Removes the rows matching `pred`, in one commit.
@@ -192,23 +162,14 @@ pub(crate) trait Table: Send + Sync + 'static {
     /// Files carrying the file tag `key`.
     fn tagged(&self, key: &'static str) -> Tagged;
 
-    /// Rewrites files still holding rows removed by [`Table::rewrite_where`], so their bytes
-    /// leave the current version. Returns the files rewritten.
-    fn compact_removed(&mut self) -> BoxFuture<'_, Result<usize>>;
-
-    /// Builds lookup indexes on `columns`, or brings existing ones up to date.
-    fn index<'a>(&'a mut self, columns: &'a [&'static str]) -> BoxFuture<'a, Result<()>>;
-
-    /// Removes versions committed before `c.before` and the files only they use (see
+    /// Removes the data of versions committed before `c.before` (see
     /// [`crate::storage::Cleanup`]). The latest version and tagged versions are kept. Returns
-    /// (versions, bytes) removed.
+    /// the data files removed (erased, with `c.erase`) and the bytes removed.
     fn cleanup(&self, c: crate::storage::Cleanup) -> BoxFuture<'_, Result<(u64, u64)>>;
 
-    /// Whether kv0 must run version cleanup itself (every few commits); `false` when the
-    /// engine cleans up on its own (Lance's automatic cleanup, configured at creation).
-    fn needs_cleanup_cadence(&self) -> bool {
-        false
-    }
+    /// moraine's upkeep at the end of `optimize` (checkpoint, log cleanup, vacuum), and moves
+    /// the handle to the latest version.
+    fn maintain(&mut self) -> BoxFuture<'_, Result<()>>;
 
     /// Tags and the versions they name, in no particular order.
     fn tags(&self) -> BoxFuture<'_, Result<Vec<(String, u64)>>>;
@@ -217,13 +178,6 @@ pub(crate) trait Table: Send + Sync + 'static {
     fn create_tag<'a>(&'a self, tag: &'a str, version: u64) -> BoxFuture<'a, Result<()>>;
 
     fn delete_tag<'a>(&'a self, tag: &'a str) -> BoxFuture<'a, Result<()>>;
-
-    /// Files read and skipped, row groups read and skipped by scans of this handle, where the
-    /// engine counts them.
-    #[cfg(all(test, feature = "delta"))]
-    fn pruning(&self) -> Option<[u64; 4]> {
-        None
-    }
 }
 
 /// Files below `target` rows: only these can be merged, so only these count.
@@ -244,29 +198,16 @@ pub(crate) async fn old_tags(t: &dyn Table) -> Result<Vec<(String, u64)>> {
     Ok(out)
 }
 
-/// A directory of tables in one engine: a tracking repository. Table names are paths under
-/// it (`runs`, `records/<name>`); each engine places a table where it keeps it (Lance:
-/// `<name>.lance`, Delta: `<name>/`).
+/// A directory of tables: a tracking repository, one moraine database. Table names are paths
+/// under it (`runs`, `records/<name>`); see [`super::moraine`] for where each is kept.
 #[derive(Clone)]
 pub(crate) struct Root {
-    uri: String,
-    options: StorageOptions,
-    engine: Engine,
-}
-
-#[derive(Clone)]
-enum Engine {
-    Lance,
-    /// With the store every table shares, for `memory://` roots (each handle on a memory
-    /// location otherwise gets a store of its own).
-    #[cfg(feature = "delta")]
-    Delta(Option<Arc<dyn deltalake_core::ObjectStore>>),
+    repo: Arc<super::moraine::Repo>,
 }
 
 impl Root {
-    /// The repository at `uri`, in the engine it was written with; a new one in `engine`, else
-    /// the one `KV0_ENGINE` names, else Lance (see [`super::format::choose`]). A new Delta
-    /// repository gets its format marker when `create` is set.
+    /// The repository at `uri`; a new one gets its format marker when `create` is set. `engine`
+    /// must be moraine when given (see [`super::format::choose`]).
     pub(crate) async fn open(
         uri: &str,
         options: &StorageOptions,
@@ -274,159 +215,35 @@ impl Root {
         engine: Option<super::Engine>,
     ) -> Result<Root> {
         use super::format::{choose, Kind};
-        let (chosen, format) = choose(uri, options, Kind::Repository, engine).await?;
-        let engine = match chosen {
-            #[cfg(feature = "delta")]
-            super::Engine::Delta => {
-                if create && matches!(format, super::Format::Empty | super::Format::Unknown) {
-                    super::format::write_marker(uri, options, Kind::Repository).await?;
-                }
-                Engine::Delta(uri.starts_with("memory://").then(|| {
-                    Arc::new(deltalake_core::logstore::object_store::memory::InMemory::new())
-                        as Arc<dyn deltalake_core::ObjectStore>
-                }))
-            }
-            #[cfg(not(feature = "delta"))]
-            super::Engine::Delta => unreachable!("choose refuses Delta without the feature"),
-            super::Engine::Lance => {
-                let _ = (create, format);
-                Engine::Lance
-            }
-        };
+        let (_, format) = choose(uri, options, Kind::Repository, engine).await?;
+        let new = matches!(format, super::Format::Empty | super::Format::Unknown);
+        let memory = uri
+            .starts_with("memory://")
+            .then(|| Arc::new(object_store::memory::InMemory::new()));
+        let marker = (create && new).then_some(Kind::Repository);
+        let repo = super::moraine::Repo::open(uri, options, memory, marker).await?;
         Ok(Root {
-            uri: uri.to_string(),
-            options: options.clone(),
-            engine,
+            repo: Arc::new(repo),
         })
     }
 
-    /// The Lance repository at `uri`, without detection (a migration's source, which may share
-    /// its location with the target).
-    #[cfg(feature = "lance-migrate")]
-    pub(crate) fn lance_at(uri: &str, options: &StorageOptions) -> Root {
-        Root {
-            uri: uri.to_string(),
-            options: options.clone(),
-            engine: Engine::Lance,
-        }
-    }
-
-    /// A Delta repository at `uri`, without detection and without writing the format marker
-    /// (a migration writes it once everything is verified).
-    #[cfg(feature = "lance-migrate")]
-    pub(crate) fn delta_at(uri: &str, options: &StorageOptions) -> Root {
-        Root {
-            uri: uri.to_string(),
-            options: options.clone(),
-            engine: Engine::Delta(uri.starts_with("memory://").then(|| {
-                Arc::new(deltalake_core::logstore::object_store::memory::InMemory::new())
-                    as Arc<dyn deltalake_core::ObjectStore>
-            })),
-        }
-    }
-
-    /// Whether the tables are Delta tables.
-    pub(crate) fn is_delta(&self) -> bool {
-        !matches!(self.engine, Engine::Lance)
-    }
-
-    /// Where table `name` is kept.
-    pub(crate) fn location(&self, name: &str) -> String {
-        match self.engine {
-            Engine::Lance => super::join(&self.uri, &format!("{name}.lance")),
-            #[cfg(feature = "delta")]
-            Engine::Delta(_) => super::join(&self.uri, name),
-        }
-    }
-
-    /// The name of the table earlier builds kept every records table in (Lance:
-    /// `records.lance`; Delta: `_legacy_records`, which a migration writes).
-    pub(crate) fn legacy_records(&self) -> &'static str {
-        match self.engine {
-            Engine::Lance => "records",
-            #[cfg(feature = "delta")]
-            Engine::Delta(_) => "_legacy_records",
-        }
-    }
-
-    /// Opens table `name`, creating it empty with `schema` (the stored layout of the Lance
-    /// engine; see `storage::types`) when it does not exist and `create` is set. `retention`
-    /// and `mark_ttl` (how long writer marks are kept, where the engine keeps them) apply to a
-    /// table created here.
+    /// Opens table `name`, creating it empty with `schema` (see `storage::types`) when it does
+    /// not exist and `create` is set.
     pub(crate) async fn table(
         &self,
         name: &str,
         schema: SchemaRef,
         create: bool,
-        retention: Option<std::time::Duration>,
-        mark_ttl: std::time::Duration,
     ) -> Result<TableRef> {
-        let uri = self.location(name);
-        match &self.engine {
-            Engine::Lance => {
-                let _ = mark_ttl;
-                super::lance::table::open(&uri, &self.options, schema, create, retention).await
-            }
-            #[cfg(feature = "delta")]
-            Engine::Delta(store) => {
-                super::delta::rows::open(
-                    &uri,
-                    &self.options,
-                    store.clone(),
-                    schema,
-                    create,
-                    retention,
-                    mark_ttl,
-                )
-                .await
-            }
-        }
+        super::moraine::table::open(&self.repo, name, schema, create).await
     }
 
-    /// Names of the tables in directory `dir`.
+    /// Names of the tables in directory `dir` (only `records` holds any).
     pub(crate) async fn tables(&self, dir: &str) -> Result<Vec<String>> {
-        let uri = super::join(&self.uri, dir);
-        match &self.engine {
-            Engine::Lance => Ok(super::list_dir(&uri, &self.options)
-                .await?
-                .into_iter()
-                .filter_map(|n| n.strip_suffix(".lance").map(str::to_string))
-                .collect()),
-            #[cfg(feature = "delta")]
-            Engine::Delta(store) => {
-                super::delta::rows::list(&uri, &self.options, store.as_ref()).await
-            }
-        }
-    }
-
-    /// Whether table `name` exists (one listing).
-    pub(crate) async fn exists(&self, name: &str) -> Result<bool> {
-        match &self.engine {
-            Engine::Lance => {
-                let file = format!("{name}.lance");
-                let (dir, base) = match file.rsplit_once('/') {
-                    Some((d, b)) => (super::join(&self.uri, d), b.to_string()),
-                    None => (self.uri.clone(), file.clone()),
-                };
-                Ok(super::list_dir(&dir, &self.options).await?.contains(&base))
-            }
-            #[cfg(feature = "delta")]
-            Engine::Delta(store) => {
-                super::delta::rows::exists(&self.location(name), &self.options, store.as_ref())
-                    .await
-            }
-        }
-    }
-
-    /// Deletes table `name` and every version of it.
-    pub(crate) async fn remove(&self, name: &str) -> Result<()> {
-        let uri = self.location(name);
-        match &self.engine {
-            Engine::Lance => super::remove_dir(&uri, &self.options).await,
-            #[cfg(feature = "delta")]
-            Engine::Delta(store) => {
-                super::delta::rows::remove(&uri, &self.options, store.as_ref()).await
-            }
+        if dir == crate::tracking::records::DIR {
+            self.repo.record_tables().await
+        } else {
+            Ok(Vec::new())
         }
     }
 }

@@ -7,11 +7,12 @@ version = 2
 unmaintained = "all"
 yanked = "deny"
 ignore = [
-    { id = "RUSTSEC-2024-0436", reason = "paste is unmaintained; a compile-time dependency of Lance's dependencies" },
-    { id = "RUSTSEC-2026-0194", reason = "quick-xml 0.39 (no fix in a version object_store 0.13 accepts): quadratic attribute checks; parses only S3 and Azure responses for the optional delta feature, from the configured endpoint" },
-    { id = "RUSTSEC-2026-0195", reason = "quick-xml 0.39 (no fix in a version object_store 0.13 accepts): unbounded namespace declarations; parses only S3 and Azure responses for the optional delta feature, from the configured endpoint" },
-    { id = "RUSTSEC-2026-0173", reason = "proc-macro-error2 is unmaintained; a compile-time dependency (validator_derive) of delta-rs, pinned exactly for the optional delta feature" },
-    { id = "RUSTSEC-2023-0071", reason = "rsa has no fixed release; used by Lance's Azure and GCS request signing (via opendal/reqsign) with locally held keys, not to decrypt untrusted input" },
+    { id = "RUSTSEC-2026-0543", reason = "chrono: in the public types of Arrow, DataFusion and delta-rs, which moraine must match" },
+    { id = "RUSTSEC-2026-0555", reason = "chrono-tz: through arrow-array, at the version Arrow 59 pins" },
+    { id = "RUSTSEC-2026-0542", reason = "humantime: through deltalake-core and object_store (duration settings); no direct use" },
+    { id = "RUSTSEC-2026-0173", reason = "proc-macro-error2 is unmaintained; a build-time dependency (validator_derive) of deltalake-core, through moraine; no runtime code" },
+    { id = "RUSTSEC-2026-0194", reason = "quick-xml 0.39 (no fix in a version object_store 0.13 accepts): quadratic attribute checks; parses only S3 responses from the configured endpoint" },
+    { id = "RUSTSEC-2026-0195", reason = "quick-xml 0.39 (no fix in a version object_store 0.13 accepts): unbounded namespace declarations; parses only S3 responses from the configured endpoint" },
 ]
 
 [licenses]
@@ -23,12 +24,14 @@ allow = [
     "BSD-2-Clause",
     "BSD-3-Clause",
     "BSL-1.0",
+    # libbz2-rs-sys (via DataFusion's compression codecs, through moraine): the permissive bzip2 licence
+    "bzip2-1.0.6",
     # tiny-keccak (compile-time, via const-random)
     "CC0-1.0",
     "CDLA-Permissive-2.0",
     "ISC",
     "MIT",
-    # option-ext (via dirs in lance-index); file-level copyleft, used unmodified
+    # option-ext (via dirs in deltalake-core, through moraine); file-level copyleft, used unmodified
     "MPL-2.0",
     "Unicode-3.0",
     "Zlib",

@@ -3,13 +3,21 @@
 ## Is kv0 a database server?
 
 No. It is a library you link into a Rust program or import in Python. Every process that opens a
-database reads and writes Lance datasets directly.
+database reads and writes its tables directly, through [moraine](https://github.com/sayef/moraine).
 
-## Why Lance?
+## Why moraine?
 
-It gives atomic, versioned commits on object stores, concurrent appenders that do not conflict, time
-travel and compaction. kv0 has no storage protocol of its own, so the same code runs on a laptop
-and on a bucket. The [design](design.md#why-lance-and-what-it-costs) has the costs.
+It is a client-only database of Delta Lake tables on object storage: atomic commits (one
+conditional write of a log entry each), concurrent writers without a coordinator, transaction ids
+for exactly-once replay, pinned versions for tags, and compaction. kv0 has no commit protocol of
+its own, so the same code runs on a laptop and on a bucket. The
+[design](design.md#why-moraine-and-what-it-costs) has the costs.
+
+## Can I open data written by kv0 0.1.0-beta.2 or earlier?
+
+No. Those releases stored data in Lance datasets, and kv0 now has only the moraine engine. Opening
+such a location fails with `NotSupported`; while kv0 is in beta there is no migration. See
+[Earlier formats](guides/storage.md#earlier-formats).
 
 ## How durable is a write?
 
@@ -26,12 +34,14 @@ sequence number wins everywhere. There are no transactions across handles.
 ## How much memory does it use?
 
 The keys of the live data, about 100 bytes per entry plus key and small value; values over 4 KiB
-stay in Lance. 10M keys use about 1 GB. The [benchmarks](benchmarks.md) have the numbers.
+stay in storage. 10M keys used about 1 GB when measured on the Lance engine; the
+[benchmarks](benchmarks.md) have the numbers.
 
 ## How long does opening take?
 
 With a snapshot from a previous close on the same machine, about 70 ms per million keys. Without
-one, a full scan: about 0.5 s per million keys.
+one, a full scan: about 0.5 s per million keys. Both were measured on the Lance engine of kv0
+0.1.0-beta.2; measurements on moraine follow.
 
 ## Does it support transactions, merge operators or column families?
 
@@ -42,7 +52,7 @@ keyspace.
 ## What does it cost on S3?
 
 A commit is a few requests and takes tens to hundreds of milliseconds, so kv0 buffers writes and
-commits in batches. Reads are served from memory; a refresh is one listing plus the new data.
+commits in batches. Reads are served from memory; a refresh reads the new log entries and data.
 
 ## Where are the benchmarks from?
 

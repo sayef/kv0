@@ -96,7 +96,7 @@ type PyRes<T> = PyResult<T>;
 /// Holds a native handle and drops it with the GIL released.
 ///
 /// Dropping the last reference to a database or repository flushes buffered writes on
-/// kv0's runtime, and Lance logs from those threads through `pyo3-log`, which needs the
+/// kv0's runtime, and the storage engine logs from those threads through `pyo3-log`, which needs the
 /// GIL. Anything that can wait on the runtime must therefore run without the GIL.
 struct Detached<T: Send>(std::mem::ManuallyDrop<T>);
 
@@ -990,8 +990,8 @@ impl PyRepo {
         record_dicts(py, &rows)
     }
 
-    /// Every row of the shared records.lance of earlier builds (of `table`, or all), in
-    /// append order, for a one-time migration; empty when there is none.
+    /// Always empty: kept for compatibility with the shared records table of earlier builds,
+    /// which no repository of this kv0 holds.
     #[pyo3(signature = (table=None))]
     fn legacy_records<'py>(
         &self,
@@ -1005,14 +1005,14 @@ impl PyRepo {
         record_dicts(py, &rows)
     }
 
-    /// Whether the shared records.lance of earlier builds exists (no rows are read).
+    /// Always false (see `legacy_records`).
     fn has_legacy_records(&self, py: Python<'_>) -> PyRes<bool> {
         let repo = (*self.repo).clone();
         py.detach(|| rt::block_on(async move { repo.has_legacy_records().await }))
             .map_err(err)
     }
 
-    /// Deletes the shared records.lance of earlier builds; returns whether there was one.
+    /// Does nothing and returns false (see `legacy_records`).
     fn drop_legacy_records(&self, py: Python<'_>) -> PyRes<bool> {
         let repo = (*self.repo).clone();
         py.detach(|| rt::block_on(async move { repo.drop_legacy_records().await }))

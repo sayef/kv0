@@ -49,7 +49,7 @@ for mode, label in (
     if f"put_wal_{mode}_ops_s" in new:
         wal.append(f"| {label} | {new[f'put_wal_{mode}_ops_s']:,.0f} |")
 kv_md = (
-    "\n".join(kv) + "\n\nWrite-ahead log modes, with a buffer that never fills (no Lance commits "
+    "\n".join(kv) + "\n\nWrite-ahead log modes, with a buffer that never fills (no commits "
     "during the run), so the rows isolate the cost of the log:\n\n" + "\n".join(wal)
 )
 

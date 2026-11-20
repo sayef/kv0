@@ -1,6 +1,6 @@
 """Key-value benchmark: put, batch write, get, seek + scan and full scan.
 
-Runs against whichever ``kv0`` is importable, so the same script measures the Lance-backed
+Runs against whichever ``kv0`` is importable, so the same script measures the Rust
 release and the pure-Python prototype (installed in another environment). Synthetic keys
 shaped like a tracker's (a run prefix, a metric path and a big-endian step).
 
@@ -133,7 +133,7 @@ def main():
                 dbw.close()
 
         # Durable per write: the prototype commits every put to SQLite anyway (and ignores sync); kv0 makes
-        # each sync=True write one Lance commit.
+        # each sync=True write one commit.
         db3 = kv0.DB(os.path.join(root, "sync"), opts)
         m = 500
         t, _ = timed(lambda: [db3.put(k, v, sync=True) for k, v in zip(ks[:m], vals[:m])])

@@ -1,8 +1,8 @@
 //! # kv0
 //!
-//! Storage for experiment trackers on [Lance](https://lance.org), on any object store Lance
-//! supports: a local directory, S3 and S3-compatible stores, Google Cloud Storage, Azure Blob
-//! Storage or `memory://`.
+//! Storage for experiment trackers on object storage: a local directory, S3 and S3-compatible
+//! stores, or `memory://`. Data lives in [moraine](https://docs.rs/morainedb) databases, whose
+//! tables are Delta Lake tables committed with one conditional write each.
 //!
 //! Two layers share one storage engine:
 //!
@@ -24,12 +24,9 @@ mod background;
 mod clock;
 pub mod error;
 pub mod kv;
-#[cfg(feature = "lance-migrate")]
-pub mod migrate;
 pub mod purge;
 pub mod rt;
 pub mod storage;
-#[cfg(feature = "delta")]
 #[doc(hidden)]
 pub mod testing;
 

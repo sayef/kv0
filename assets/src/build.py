@@ -50,7 +50,7 @@ THEMES = {
         "rule": "#26282C",
     },
 }
-TAGLINE = "An ordered key-value store on Lance, on any object store"
+TAGLINE = "An ordered key-value store on object storage"
 
 
 def mark(color, x=0.0, y=0.0, size=64.0):
@@ -201,7 +201,7 @@ def main():
     t = THEMES["light"]
     body, w = lockup(112, 300, 128, "light")
     tag, _ = text_path(TEXT, TAGLINE, 116, 384, 34)
-    sub, _ = text_path(MONO, "Rust and Python. Local disk, S3, GCS, Azure.", 116, 440, 26)
+    sub, _ = text_path(MONO, "Rust and Python. Local disk and S3, on moraine.", 116, 440, 26)
     social = svg(
         1280,
         640,
@@ -209,7 +209,7 @@ def main():
         f'<g transform="translate(860 100)">{key_rows(320, 0, 220, "light", 6)}</g>'
         + body
         + f'<path d="{tag}" fill="{t["ink"]}"/><path d="{sub}" fill="{t["meta"]}"/>',
-        "kv0: an ordered key-value store on Lance",
+        "kv0: an ordered key-value store on object storage",
     )
     write("social-preview.svg", social)
     png = resvg_py.svg_to_bytes(svg_string=social)

@@ -20,13 +20,14 @@ deciding whether to put their data in kv0, and then by the same engineers lookin
 ## Name
 
 **kv0**: a key-value store, and zero, the first key of an ordered keyspace and the number of
-storage protocols of its own (Lance does the storing). Always lower case, set in the mono face
+storage protocols of its own (moraine does the storing: a multi-writer database on object
+storage using Delta Lake tables). Always lower case, set in the mono face
 where it appears as a word on its own, like a crate name.
 
 ## Subject
 
 An embedded engine: ordered keys in byte order, atomic batches, iterators that seek; versions,
-write-ahead logs and compaction; local disk, S3, GCS and Azure; Rust and Python. Its readers care
+write-ahead logs and compaction; local disk and S3; Rust and Python. Its readers care
 about guarantees, numbers with their method, and what happens on a crash.
 
 ## Voice and tone

@@ -1,7 +1,7 @@
 //! Hooks for kv0's own concurrency and crash tests. Not part of the supported API: anything
 //! here may change in any release.
 //!
-//! [`set_faults`] makes the object stores of Delta Lake tables fail, delay or lose the
+//! [`set_faults`] makes the object stores of moraine databases fail, delay or lose the
 //! responses of operations at seeded random points, or end the process at a chosen write, as a
 //! crash would. Tables opened before faults are first configured in a process are not affected.
 
@@ -53,7 +53,7 @@ pub struct Stall {
     pub millis: u64,
 }
 
-/// Faults injected into every Delta Lake table opened afterwards in this process.
+/// Faults injected into every moraine database opened afterwards in this process.
 #[derive(Clone, Debug, Default)]
 pub struct Faults {
     /// Seeds the random choice of operations and kinds; print it to reproduce a run.
@@ -78,17 +78,17 @@ pub struct Faults {
 /// Configures faults for this process (`None` stops them; tables opened since the first call
 /// stay wrapped and pass operations through).
 pub fn set_faults(faults: Option<Faults>) {
-    crate::storage::delta::faults::set(faults);
+    crate::storage::faults::set(faults);
 }
 
 /// Operations held by [`Faults::stall`] so far in this process (counted when the hold starts).
 pub fn stalls_entered() -> u64 {
-    crate::storage::delta::faults::stalls_entered()
+    crate::storage::faults::stalls_entered()
 }
 
 /// Faults injected so far in this process.
 pub fn faults_injected() -> u64 {
-    crate::storage::delta::faults::injected()
+    crate::storage::faults::injected()
 }
 
 /// Whether a file under the local directory `dir` holds `needle`: in its raw bytes, or, for a
@@ -103,18 +103,23 @@ pub fn stored_anywhere(dir: &std::path::Path, needle: &[u8]) -> bool {
         if p.is_dir() {
             return stored_anywhere(&p, needle);
         }
-        let Ok(bytes) = std::fs::read(&p) else {
-            return false;
-        };
-        if bytes.windows(needle.len()).any(|w| w == needle) {
-            return true;
-        }
-        p.extension().is_some_and(|x| x == "parquet") && parquet_holds(bytes, needle)
+        file_holds(&p, needle)
     })
 }
 
+/// [`stored_anywhere`] for one file.
+pub fn file_holds(p: &std::path::Path, needle: &[u8]) -> bool {
+    let Ok(bytes) = std::fs::read(p) else {
+        return false;
+    };
+    if bytes.windows(needle.len()).any(|w| w == needle) {
+        return true;
+    }
+    p.extension().is_some_and(|x| x == "parquet") && parquet_holds(bytes, needle)
+}
+
 fn parquet_holds(bytes: Vec<u8>, needle: &[u8]) -> bool {
-    use deltalake_core::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
     let Ok(reader) =
         ParquetRecordBatchReaderBuilder::try_new(bytes::Bytes::from(bytes)).and_then(|b| b.build())
     else {
@@ -128,12 +133,13 @@ fn parquet_holds(bytes: Vec<u8>, needle: &[u8]) -> bool {
     })
 }
 
-fn array_holds(a: &dyn deltalake_core::arrow::array::Array, needle: &[u8]) -> bool {
-    use deltalake_core::arrow::array::{
+fn array_holds(a: &dyn arrow_array::Array, needle: &[u8]) -> bool {
+    use arrow_array::types::Int32Type;
+    use arrow_array::{
         BinaryArray, DictionaryArray, LargeBinaryArray, LargeListArray, LargeStringArray,
         ListArray, MapArray, StringArray, StructArray,
     };
-    use deltalake_core::arrow::datatypes::{DataType, Int32Type};
+    use arrow_schema::DataType;
     let has = |v: &[u8]| v.windows(needle.len()).any(|w| w == needle);
     let any = a.as_any();
     match a.data_type() {

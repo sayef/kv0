@@ -1,5 +1,10 @@
 # Benchmarks
 
+!!! note "Measured on the Lance engine"
+    Every number on this page was measured with kv0 0.1.0-beta.2, which stored data in Lance
+    datasets. kv0 now stores everything with moraine, so these numbers describe the earlier
+    engine. I will replace them with measurements on moraine, made the same way.
+
 Two reports, both produced by the harness in `bench/eval/` on one machine (Intel i5-13500, NVMe,
 Linux), five repetitions per cell. A difference counts as significant only when the ranges do not
 overlap and the medians differ by more than 20%; everything else is reported as "same" or "not

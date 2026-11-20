@@ -10,7 +10,6 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use futures::future::BoxFuture;
-use futures::FutureExt;
 
 use crate::error::Result;
 use crate::kv::view::{Op, SnapChunk};
@@ -98,29 +97,6 @@ pub(crate) trait OpLog: Send + Sync + 'static {
     /// other writers appended meanwhile are kept.
     fn rewrite(&self, chunks: Vec<SnapChunk>) -> BoxFuture<'static, Result<Log>>;
 
-    /// [`OpLog::rewrite`] for a migration: the values the chunks leave in storage are read from
-    /// `source`, the log being migrated.
-    #[cfg(feature = "lance-migrate")]
-    fn rewrite_from(
-        &self,
-        _chunks: Vec<SnapChunk>,
-        _source: Log,
-    ) -> BoxFuture<'static, Result<Log>> {
-        futures::future::ready(Err(crate::Error::NotSupported(
-            "this engine cannot be a migration's target".into(),
-        )))
-        .boxed()
-    }
-
-    /// Commits writer marks alone, for a migration carrying over the source's marks.
-    #[cfg(feature = "lance-migrate")]
-    fn adopt_marks(&self, _marks: Vec<WriterMark>) -> BoxFuture<'static, Result<Log>> {
-        futures::future::ready(Err(crate::Error::NotSupported(
-            "this engine cannot be a migration's target".into(),
-        )))
-        .boxed()
-    }
-
     /// Merges small files into larger ones, rows unchanged, in one commit.
     fn merge_small(&self) -> BoxFuture<'static, Result<Log>>;
 
@@ -133,16 +109,10 @@ pub(crate) trait OpLog: Send + Sync + 'static {
     /// Every version still stored, oldest first.
     fn versions(&self) -> BoxFuture<'_, Result<Vec<VersionInfo>>>;
 
-    /// Removes versions committed before `c.before` and the files only they use (see
+    /// Removes the data of versions committed before `c.before` (see
     /// [`crate::storage::Cleanup`]). The latest version and tagged versions are kept. Returns
-    /// (versions, bytes) removed.
+    /// the data files removed (erased, with `c.erase`) and the bytes removed.
     fn cleanup(&self, c: crate::storage::Cleanup) -> BoxFuture<'_, Result<(u64, u64)>>;
-
-    /// Whether kv0 must run version cleanup itself (every few commits); `false` when the
-    /// engine cleans up on its own (Lance's automatic cleanup, configured at creation).
-    fn needs_cleanup_cadence(&self) -> bool {
-        false
-    }
 
     /// Tags and the versions they name, in no particular order.
     fn tags(&self) -> BoxFuture<'_, Result<Vec<(String, u64)>>>;
@@ -155,68 +125,38 @@ pub(crate) trait OpLog: Send + Sync + 'static {
 
     fn delete_tag<'a>(&'a self, tag: &'a str) -> BoxFuture<'a, Result<()>>;
 
-    /// The highest sequence number `writer` committed, for engines that keep writer marks
-    /// outside the rows (Delta's `txn` actions). `None` when the engine keeps them as rows,
-    /// which the view reads like any other.
-    fn writer_mark<'a>(&'a self, _writer: &'a str) -> BoxFuture<'a, Result<Option<u64>>> {
-        futures::future::ready(Ok(None)).boxed()
-    }
+    /// The highest sequence number `writer` committed (its moraine transaction id).
+    fn writer_mark<'a>(&'a self, writer: &'a str) -> BoxFuture<'a, Result<Option<u64>>>;
 
     /// The log's identity: a log deleted and created again at the same location gets a new
-    /// one. Empty when the engine has none.
-    fn log_id(&self) -> String {
-        String::new()
-    }
+    /// one.
+    fn log_id(&self) -> String;
 
-    /// The engine's table behind row addresses, when it keeps one per handle (Delta numbers
-    /// files as it meets them), so a view snapshot can restore it with its addresses.
-    fn addr_table(&self) -> Vec<String> {
-        Vec::new()
-    }
+    /// The table behind row addresses (files numbered as the handle meets them), so a view
+    /// snapshot can restore it with its addresses.
+    fn addr_table(&self) -> Vec<String>;
 
     /// Restores a table [`OpLog::addr_table`] returned, before anything is read.
-    fn restore_addr_table(&self, _table: Vec<String>) {}
+    fn restore_addr_table(&self, table: Vec<String>);
 
     /// `(key, seq, row address)` of every put the commit that made this version wrote, when
-    /// this handle made it and the engine knows them without reading (an append).
-    fn written(&self) -> Option<Arc<Vec<(Bytes, u64, u64)>>> {
-        None
-    }
+    /// this handle made it with an append.
+    fn written(&self) -> Option<Arc<Vec<(Bytes, u64, u64)>>>;
 }
 
 /// Opens the log at `uri`: at `version` when given, else the latest version, creating an empty
-/// log when there is none and `create` is set. `retention` and `mark_ttl` (how long writer marks
-/// are kept, where the engine keeps them itself) apply to a log created here.
-///
-/// An existing log opens with the engine it was written in; a new one with `engine`, else the
-/// one `KV0_ENGINE` names, else Lance. Asking for another engine than an existing log's fails
-/// (see [`super::format::choose`]).
-#[allow(clippy::too_many_arguments)]
+/// log when there is none and `create` is set. `engine` must be moraine when given; a location
+/// written by an earlier engine fails (see [`super::format::choose`]).
 pub(crate) async fn open(
     uri: &str,
     options: &super::StorageOptions,
     version: Option<u64>,
     create: bool,
-    retention: Option<std::time::Duration>,
-    mark_ttl: std::time::Duration,
     engine: Option<super::Engine>,
 ) -> Result<Log> {
     use super::format::{choose, Kind};
-    let (engine, format) = choose(uri, options, Kind::Database, engine).await?;
-    match engine {
-        #[cfg(feature = "delta")]
-        super::Engine::Delta => {
-            let new = matches!(format, super::Format::Empty | super::Format::Unknown);
-            if new && create && version.is_none() {
-                super::format::write_marker(uri, options, Kind::Database).await?;
-            }
-            super::delta::kv::open(uri, options, version, create, retention, mark_ttl).await
-        }
-        #[cfg(not(feature = "delta"))]
-        super::Engine::Delta => unreachable!("choose refuses Delta without the feature"),
-        super::Engine::Lance => {
-            let _ = (mark_ttl, format);
-            super::lance::kv::open(uri, options, version, create, retention).await
-        }
-    }
+    let (_, format) = choose(uri, options, Kind::Database, engine).await?;
+    let new = matches!(format, super::Format::Empty | super::Format::Unknown);
+    let marker = new && create && version.is_none();
+    super::moraine::kv::open(uri, options, version, create, marker).await
 }

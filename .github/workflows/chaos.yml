@@ -1,7 +1,7 @@
 name: Chaos
 
-# The long, randomized runs of the Delta Lake engine's concurrency and crash suite
-# (crates/kv0/tests/chaos.rs). Every pull request runs the short version in the `test` jobs of
+# The long, randomized runs of the concurrency and crash suites (crates/kv0/tests/chaos.rs and
+# crates/kv0/tests/moraine.rs). Every pull request runs the short version in the `test` jobs of
 # CI; this runs it scaled up with several seeds, on local disk and an S3-compatible server.
 # Report-only: a failure shows in the run summary with the seed that reproduces it.
 
@@ -28,7 +28,6 @@ env:
   CARGO_TERM_COLOR: always
   KV0_TEST_S3_ENDPOINT: http://127.0.0.1:9000
   KV0_TEST_S3_BUCKET: kv0-test
-  KV0_TEST_BACKEND: delta
 
 jobs:
   chaos:
@@ -38,14 +37,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libprotobuf-dev
       - name: Start an S3-compatible server
         run: .github/scripts/s3-server.sh
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
-      - run: cargo test -p kv0 --features delta --test chaos --no-run
+      - run: cargo test -p kv0 --test chaos --test moraine --no-run
       - name: Randomized runs
         continue-on-error: true
         env:
@@ -57,7 +55,7 @@ jobs:
             seed=$(od -An -N8 -tu8 /dev/urandom | tr -d ' ')
             echo "::group::KV0_CHAOS_SEED=$seed KV0_CHAOS_SCALE=$SCALE"
             if KV0_CHAOS_SEED=$seed KV0_CHAOS_SCALE=$SCALE \
-              cargo test -p kv0 --features delta --test chaos -- --test-threads=2; then
+              cargo test -p kv0 --test chaos --test moraine -- --test-threads=2; then
               echo "- seed $seed (scale $SCALE): passed" >> "$GITHUB_STEP_SUMMARY"
             else
               echo "- seed $seed (scale $SCALE): **failed**; reproduce with KV0_CHAOS_SEED=$seed KV0_CHAOS_SCALE=$SCALE" >> "$GITHUB_STEP_SUMMARY"

@@ -15,7 +15,8 @@ advisory unless you prefer otherwise.
 
 ## Scope
 
-kv0 reads and writes Lance datasets at locations you configure, and trusts storage that only
-authorised writers can modify. Credentials are passed to the object store as storage options or taken
-from the environment; kv0 does not log or persist them. Reports of crashes, out-of-bounds reads or
-excessive resource use from data kv0 itself wrote are in scope, as are credential leaks.
+kv0 reads and writes moraine databases (Delta Lake tables) at locations you configure, and trusts
+storage that only authorised writers can modify. Credentials are passed to the object store as storage
+options or taken from the environment; kv0 does not log or persist them. Reports of crashes,
+out-of-bounds reads or excessive resource use from data kv0 itself wrote are in scope, as are
+credential leaks.

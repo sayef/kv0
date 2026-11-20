@@ -2,7 +2,7 @@
 
 kv0 has two layers on the same storage: an ordered key-value store and tracking tables. This page
 explains the key-value model; the tracking layer reuses the same machinery (buffering, a
-write-ahead log, Lance versions) for typed tables. The [design](design.md) has the full
+write-ahead log, moraine versions) for typed tables. The [design](design.md) has the full
 guarantees and the alternatives that were rejected.
 
 ## An ordered key-value store
@@ -23,7 +23,7 @@ key layout useful: put the things you read together next to each other
 ## WriteBatch
 
 A `WriteBatch` groups puts, deletes and range deletes. It is applied under one lock and committed in
-one Lance version, never split: other handles see all of it or none of it, and so does storage after
+one version, never split: other handles see all of it or none of it, and so does storage after
 a crash. Within a batch, later operations win (`put` then `delete` of one key leaves it deleted).
 
 ## Iterators
@@ -51,23 +51,24 @@ The log is on the machine that wrote. Losing the machine loses writes since the 
 
 ## Flush and compaction
 
-The buffer is committed as one Lance append (one data file, one version) when it exceeds
+The buffer is committed as one append (one data file, one version) when it exceeds
 `write_buffer_size` (4 MiB), every `flush_interval` (5 s), on `flush()`, on `sync=True` writes and
 on `close()`. Each commit adds a file, so kv0 **compacts** once there are more than `max_fragments`
 small files: it merges files, or, when most stored rows are overwritten or deleted, rewrites the
-dataset as the live view in one commit. Compaction runs concurrently with other writers' appends.
+log as the live view in one commit. Compaction runs concurrently with other writers' appends.
 
-## Versions and time travel
+## Versions and tags
 
-Every commit is a Lance version. `DB(path, version=n)` opens version `n` read-only; `versions()`
-lists them; tags name a version and keep it. Old versions are cleaned up automatically after
-`version_retention` (7 days) or on `cleanup_old_versions(age)`. See
+Every commit is a version, but only the latest version and tagged ones stay readable: a tag names
+a version and keeps its files. `DB(path, version=n)` opens version `n` read-only when it is the
+latest or a tagged one; `versions()` lists those. Files that only older versions use are removed
+after `version_retention` (7 days), or on `cleanup_old_versions(age)`. See
 [operations](guides/operations.md#cleanup-safety) before cleaning up aggressively.
 
 ## Several writers
 
-Any number of handles, in any number of processes and machines, can write to one database. Lance
-commits are atomic, and appends from different writers do not conflict. Each operation carries a
+Any number of handles, in any number of processes and machines, can write to one database. Commits
+are atomic, and appends from different writers do not conflict. Each operation carries a
 sequence number from a hybrid logical clock; when two writers write one key, the higher sequence
 number wins on every reader. Other handles see committed writes within `refresh_interval` (1 s), or
 at once after `refresh()`. There are no transactions across handles.
@@ -78,14 +79,16 @@ The view of keys lives in memory, one compact allocation per entry. Two measures
 open time bounded:
 
 - **Lazy values.** A committed value longer than `lazy_value_threshold` (4 KiB) is not kept in
-  memory: the view holds its row address and reads it from Lance when needed, through a
-  `value_cache_size` (64 MiB) cache. 100 000 values of 16 KiB reopen in 90 MB instead of 2.6 GB.
+  memory: the view holds its row address and reads it from storage when needed, through a
+  `value_cache_size` (64 MiB) cache. 100 000 values of 16 KiB reopened in 90 MB instead of
+  2.6 GB (measured on the Lance engine of kv0 0.1.0-beta.2).
 - **Snapshots.** On close, a handle saves its view (when it has at least 100 000 entries) next to
-  the write-ahead log. The next open loads it and reads only data committed since: 10M keys open
-  in 0.7 s instead of 5.4 s. A snapshot that no longer matches the dataset is ignored.
+  the write-ahead log. The next open loads it and reads only data committed since (10M keys
+  opened in 0.7 s instead of 5.4 s on the Lance engine). A snapshot that no longer matches the
+  database is ignored.
 
 ## Tracking tables
 
-`kv0.tracking` stores runs, parameters and metric series in four Lance tables, written through
+`kv0.tracking` stores runs, parameters and metric series in four tables, written through
 the same buffering and write-ahead log. Points are appended; reads ask for a series and a step or
 time range. See the [tracking guide](guides/tracking.md).

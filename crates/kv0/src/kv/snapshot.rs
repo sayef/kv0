@@ -10,8 +10,9 @@
 //! invalidates it, and the open falls back to a full scan. Files committed since are read and
 //! applied as usual.
 //!
-//! Version 2 (`KV0VIEW2`, still read) stored file ids as `u64` (Lance fragment ids) and had no
-//! identity or address table.
+//! Version 2 (`KV0VIEW2`) described Lance fragments. It is not read any more: a moraine log
+//! cannot match it, so such a file is ignored like any unreadable snapshot and rewritten after
+//! the full scan.
 
 use std::fs;
 use std::io::{self, BufReader, BufWriter, Read, Write};
@@ -23,7 +24,6 @@ use super::view::View;
 use crate::storage::oplog::{FileId, OpLog};
 
 const MAGIC: &[u8; 8] = b"KV0VIEW3";
-const MAGIC_V2: &[u8; 8] = b"KV0VIEW2";
 
 /// Longest string a snapshot holds (file ids, identities, address-table entries).
 const MAX_STR: usize = 4096;
@@ -185,29 +185,22 @@ pub(crate) fn read(path: &Path) -> io::Result<Option<Loaded>> {
     };
     let mut magic = [0u8; 8];
     r.read_exact(&mut magic)?;
-    let v2 = &magic == MAGIC_V2;
-    if &magic != MAGIC && !v2 {
-        return Err(bad("not a kv0 view snapshot"));
+    if &magic != MAGIC {
+        return Err(bad("not a kv0 view snapshot of this version"));
     }
     let version = get_u64(&mut r)?;
-    let log_id = if v2 { String::new() } else { get_str(&mut r)? };
+    let log_id = get_str(&mut r)?;
     let n = get_u64(&mut r)?;
     let mut frags = Vec::new();
     for _ in 0..n {
-        let id = if v2 {
-            get_u64(&mut r)?.to_string()
-        } else {
-            get_str(&mut r)?
-        };
+        let id = get_str(&mut r)?;
         let ident = get_str(&mut r)?;
         frags.push((FileId(id), ident));
     }
+    let n = get_u64(&mut r)?;
     let mut addr_table = Vec::new();
-    if !v2 {
-        let n = get_u64(&mut r)?;
-        for _ in 0..n {
-            addr_table.push(get_str(&mut r)?);
-        }
+    for _ in 0..n {
+        addr_table.push(get_str(&mut r)?);
     }
     let view = View::read_from(&mut r)?;
     let digest = r.h.digest();
@@ -240,11 +233,7 @@ pub(crate) fn still_valid(l: &Loaded, log: &dyn OpLog) -> bool {
 mod tests {
     use super::*;
 
-    /// A `KV0VIEW2` file, as kv0 0.1.0-beta.2 wrote it, still loads.
-    #[test]
-    fn reads_version_2() {
-        let dir = tempfile::tempdir().unwrap();
-        let p = dir.path().join("view.snap");
+    fn one_put() -> View {
         let mut view = View::default();
         view.apply(crate::kv::view::Op {
             seq: 7,
@@ -252,41 +241,49 @@ mod tests {
             key: bytes::Bytes::from_static(b"k"),
             value: Some(bytes::Bytes::from_static(b"v")),
         });
-        let mut w = Hashing {
-            inner: Vec::new(),
-            h: Xxh3::new(),
-        };
-        w.write_all(MAGIC_V2).unwrap();
-        w.write_all(&3u64.to_le_bytes()).unwrap();
-        w.write_all(&1u64.to_le_bytes()).unwrap();
-        w.write_all(&5u64.to_le_bytes()).unwrap();
-        put_str(&mut w, "data/x.lance|1|").unwrap();
-        view.write_to(&mut w).unwrap();
-        let digest = w.h.digest();
-        let mut bytes = w.inner;
-        bytes.extend_from_slice(&digest.to_le_bytes());
-        fs::write(&p, bytes).unwrap();
-        let l = read(&p).unwrap().unwrap();
-        assert_eq!(l.version, 3);
-        assert_eq!(l.log_id, "");
-        assert_eq!(
-            l.frags,
-            vec![(FileId("5".into()), "data/x.lance|1|".into())]
-        );
-        assert!(l.addr_table.is_empty());
-        assert_eq!(l.view.live, 1);
+        view
+    }
 
-        // Written back as version 3, with string ids.
+    #[test]
+    fn round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("view.snap");
         let saved = Saved {
             version: 4,
             log_id: "id".into(),
             frags: &[(FileId("part-1.parquet".into()), "part-1.parquet|10".into())],
             addr_table: vec!["part-1.parquet|10".into()],
         };
-        write(&p, &saved, &l.view).unwrap();
+        write(&p, &saved, &one_put()).unwrap();
         let l = read(&p).unwrap().unwrap();
         assert_eq!((l.version, l.log_id.as_str()), (4, "id"));
-        assert_eq!(l.frags[0].0, FileId("part-1.parquet".into()));
+        assert_eq!(
+            l.frags,
+            vec![(FileId("part-1.parquet".into()), "part-1.parquet|10".into())]
+        );
         assert_eq!(l.addr_table, vec!["part-1.parquet|10".to_string()]);
+        assert_eq!(l.view.live, 1);
+    }
+
+    /// A `KV0VIEW2` file, as kv0 0.1.0-beta.2 wrote it for Lance, is refused (and so ignored).
+    #[test]
+    fn refuses_version_2() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("view.snap");
+        let mut w = Hashing {
+            inner: Vec::new(),
+            h: Xxh3::new(),
+        };
+        w.write_all(b"KV0VIEW2").unwrap();
+        w.write_all(&3u64.to_le_bytes()).unwrap();
+        w.write_all(&1u64.to_le_bytes()).unwrap();
+        w.write_all(&5u64.to_le_bytes()).unwrap();
+        put_str(&mut w, "data/x.lance|1|").unwrap();
+        one_put().write_to(&mut w).unwrap();
+        let digest = w.h.digest();
+        let mut bytes = w.inner;
+        bytes.extend_from_slice(&digest.to_le_bytes());
+        fs::write(&p, bytes).unwrap();
+        assert!(read(&p).is_err());
     }
 }

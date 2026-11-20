@@ -13,13 +13,13 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use bytes::Bytes;
-use deltalake_core::logstore::object_store::{
-    self, CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta,
-    PutMultipartOptions, PutOptions, PutPayload, PutResult, RenameOptions,
-};
-use deltalake_core::{ObjectStore, Path};
 use futures::stream::BoxStream;
 use futures::StreamExt;
+use object_store::path::Path;
+use object_store::{
+    CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
+    PutMultipartOptions, PutOptions, PutPayload, PutResult, RenameOptions,
+};
 
 use crate::testing::{Crash, FaultKind, Faults, Stall, StoreOp};
 
@@ -103,6 +103,17 @@ enum Plan {
     Crash { after: bool },
 }
 
+/// Whether `path` is one of moraine's conditional-write probe objects (`<prefix>/probe/<name>`).
+///
+/// Faults pass them by (a planned crash does not). moraine probes a store once per process and caches the answer; a
+/// compare-and-swap that is sent twice (or retried after a lost response) answers the second
+/// time with a failed precondition, which the probe takes for a store that cannot
+/// compare-and-swap, and every later write of the process fails with `NotSupported`. That is a
+/// limitation of moraine's probe, not of kv0, and these tests are about kv0.
+fn is_probe(path: &str) -> bool {
+    path.rsplit('/').nth(1) == Some("probe")
+}
+
 fn plan(op: StoreOp, path: &str) -> Plan {
     let guard = CONFIG.read().expect("not poisoned");
     let Some(f) = guard.as_ref() else {
@@ -112,6 +123,9 @@ fn plan(op: StoreOp, path: &str) -> Plan {
         if ops.contains(&op) && CRASH_COUNT.fetch_add(1, Ordering::Relaxed) + 1 == *nth {
             return Plan::Crash { after: *after };
         }
+    }
+    if is_probe(path) {
+        return Plan::Pass;
     }
     let rate = match op {
         StoreOp::Get | StoreOp::List => f.read_rate,

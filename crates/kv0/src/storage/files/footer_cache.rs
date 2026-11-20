@@ -8,12 +8,13 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use deltalake_core::parquet::arrow::arrow_reader::{ArrowReaderMetadata, ArrowReaderOptions};
-#[allow(deprecated)] // see `scan`
-use deltalake_core::parquet::arrow::async_reader::ParquetObjectReader;
-use deltalake_core::parquet::file::metadata::PageIndexPolicy;
-use deltalake_core::{ObjectStore, Path};
+use object_store::path::Path;
+use object_store::ObjectStore;
 use parking_lot::Mutex;
+use parquet::arrow::arrow_reader::{ArrowReaderMetadata, ArrowReaderOptions};
+#[allow(deprecated)] // see `scan`
+use parquet::arrow::async_reader::ParquetObjectReader;
+use parquet::file::metadata::PageIndexPolicy;
 
 use crate::error::Result;
 

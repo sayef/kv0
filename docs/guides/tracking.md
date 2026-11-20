@@ -1,7 +1,7 @@
 # Tracking tables
 
-`kv0.tracking.Repo` stores runs, parameters and metric series in four Lance tables under one
-location. It is the storage of an experiment tracker; the Rust crate exposes the same API
+`kv0.tracking.Repo` stores runs, parameters and metric series in four tables of one moraine
+database at one location. It is the storage of an experiment tracker; the Rust crate exposes the same API
 (`kv0::tracking`) with async methods.
 
 ## Runs
@@ -129,9 +129,9 @@ Per-item data that is not a series (evaluation datasets, one output and several 
 per run, application state) goes in records tables: JSON rows under a table name, each with an
 item id and optionally a run id. A row's key is `(run_id, item_id)`: appending a row whose key is
 already present supersedes the older one, and reads return the newest row per key. Each table is
-its own Lance dataset with its own versions and tags; `optimize()` drops superseded rows and keeps
-indices on `item_id` and `run_id`, so a lookup reads only the matching rows. Nothing is kept in
-memory.
+its own moraine table with its own versions and tags, with its files sorted by `run_id` and
+`item_id`; `optimize()` drops superseded rows. A lookup by run or item reads only the files and
+pages whose ranges hold it. Nothing is kept in memory.
 
 ```python
 v = repo.append_records('dataset:qa', [{'item_id': 'q1', 'data': {'input': '...', 'expected': '...'}}])
@@ -144,26 +144,8 @@ repo.records('dataset:qa', tag='qa-v1')           # exactly as it was when tagge
 ```
 
 A run can record the version of a table it read (`records_version(table)`), and read it back later
-by version or tag. `record_tables()` lists the tables. Give data with its own lifecycle (an
+by tag, or by version while it is still the table's latest. `record_tables()` lists the tables. Give data with its own lifecycle (an
 evaluation dataset) its own table, so tagging it does not keep other tables' history alive.
-
-### Records from earlier builds
-
-Builds before per-table records kept every table in one `records.lance`. Opening such a
-repository fails with a message, so the rows are not silently ignored. Migrate once:
-
-```python
-repo = Repo(path, legacy_records='allow')        # repo.has_legacy_records() checks cheaply
-for table in {r['table'] for r in repo.legacy_records()}:
-    rows = repo.legacy_records(table)               # every row, in append order
-    repo.append_records(table, [{'item_id': r['item_id'], 'run_id': r['run_id'], 'data': r['data']}
-                                for r in rows])     # later rows of a key supersede earlier ones
-repo.drop_legacy_records()
-repo.close()
-repo = Repo(path)                                    # the default check passes now
-```
-
-Tags on the old table are not carried over; tag the new tables again where needed.
 
 ## Deleting runs
 

@@ -1,7 +1,7 @@
 //! Local write-ahead log for the key-value layer.
 //!
 //! Every write is appended to a local file before it is acknowledged, so buffered writes survive
-//! a crash of the process; Lance commits stay batched. Layout:
+//! a crash of the process; commits stay batched. Layout:
 //!
 //! ```text
 //! <root>/<xxh3 of the dataset URI>/uri                 the dataset URI, for people
@@ -15,7 +15,7 @@
 //! mismatch anywhere else is corruption and fails the open.
 //!
 //! A flush seals the current segment and opens the next, so the sealed segments hold exactly the
-//! operations being committed. After the Lance commit succeeds they are deleted. The committed
+//! operations being committed. After the commit succeeds they are deleted. The committed
 //! fragment also holds a mark row with the writer id and its highest committed sequence number;
 //! compaction carries marks forward, so a replay after a crash between the commit and the delete
 //! skips what was already committed, however long ago that was.

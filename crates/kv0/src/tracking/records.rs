@@ -1,14 +1,15 @@
 //! Versioned tables of JSON rows for per-item data: evaluation datasets, per-run outputs and
 //! scores, labels, application state.
 //!
-//! Each logical table is its own Lance dataset, `records/<name>.lance`, so a table's versions
-//! and tags cover that table only: tagging a dataset's version keeps that dataset, not every
-//! other table's rows at the time. A row is `(table_name, run_id?, item_id, data, seq,
-//! created_at)`, keyed by `(run_id, item_id)`: an append with a key already present supersedes
-//! the older row, and reads return the newest row per key. `optimize` folds superseded rows
-//! away and keeps B-tree indices on `item_id` and `run_id`, so a lookup by either reads only
-//! the matching rows. Nothing is kept in memory; a commit returns the table's version, which a
-//! run can record and read back exactly later (by version, or by a tag that survives cleanup).
+//! Each logical table is its own moraine table (`records/<name>`, see `storage::moraine`), so a
+//! table's versions and tags cover that table only: tagging a table's version keeps that table,
+//! not every other table's rows at the time. A row is `(table_name, run_id?, item_id, data,
+//! seq, created_at)`, keyed by `(run_id, item_id)`: an append with a key already present
+//! supersedes the older row, and reads return the newest row per key. `optimize` folds
+//! superseded rows away. Files are sorted by `(run_id, item_id)` and pruned by their statistics,
+//! so a lookup by either reads few pages. Nothing is kept in memory; a commit returns the
+//! table's version, which a run can record and read back exactly later (by a tag that survives
+//! cleanup; moraine keeps only the latest and tagged versions readable).
 
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
@@ -23,7 +24,6 @@ use crate::storage::oplog::FileId;
 use crate::storage::pred::Pred;
 use crate::storage::table::{Root, Scan, TableRef};
 use crate::storage::types::{logical_schema, seq_from_i64, seq_to_i64};
-use crate::storage::{self, StorageOptions};
 pub static RECORDS: LazyLock<SchemaRef> = LazyLock::new(|| {
     Arc::new(Schema::new(vec![
         Field::new("seq", DataType::UInt64, false),
@@ -90,10 +90,9 @@ pub struct RecordQuery {
 /// Run ids per `IN` list, so a long list does not make one huge filter.
 const RUN_IDS_PER_QUERY: usize = 500;
 
-/// The directory name of a table's dataset: letters, digits, `-` and `_` (and `.` after the
-/// first byte) as they are, every other byte as `=XX`. Only characters object stores never
-/// percent-encode are used: an earlier `~XX` scheme made Lance address the dataset's tag refs
-/// at a percent-encoded path (`%7E`) next to the data, so cleanup did not see those tags.
+/// The directory name of a records table (`records/<name>`, which `storage::moraine` maps to a
+/// moraine table name): letters, digits, `-` and `_` (and `.` after the first byte) as they
+/// are, every other byte as `=XX`.
 pub(crate) fn encode(table: &str) -> String {
     let mut out = String::new();
     for b in table.bytes() {
@@ -121,181 +120,19 @@ fn unescape(name: &str, esc: u8) -> Option<String> {
 }
 
 pub(crate) fn decode(name: &str) -> Option<String> {
-    if name.contains('~') || name.contains('%') {
-        return None; // written by the earlier scheme; see `migrate_paths`
-    }
     unescape(name, b'=')
-}
-
-/// Moves records tables written with the earlier `~XX` directory names to the current ones,
-/// together with any tags Lance filed under the percent-encoded twin (`%7E`) of such a name.
-/// Local repositories are migrated in place; on an object store the stray names are reported.
-/// Returns the tables moved.
-pub(crate) async fn migrate_paths(root: &str, opts: &StorageOptions) -> Result<Vec<String>> {
-    let dir = storage::join(root, DIR);
-    let names = storage::list_dir(&dir, opts).await?;
-    let old: Vec<&String> = names
-        .iter()
-        .filter(|n| n.contains('~') || n.contains("%7E") || n.contains("%7e"))
-        .collect();
-    if old.is_empty() {
-        return Ok(Vec::new());
-    }
-    if !storage::is_local(&dir) {
-        return Err(Error::InvalidArgument(format!(
-            "records tables under {dir} use directory names of an earlier build ({}); copy each \
-             <name>.lance to the name encode() gives now (with its _refs from the %7E twin) and \
-             remove the old ones",
-            old.iter()
-                .map(|n| n.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        )));
-    }
-    let base = std::path::PathBuf::from(dir.strip_prefix("file://").unwrap_or(&dir));
-    // Another process may be migrating the same repository at the same time. A step that fails
-    // while the other process completes it is judged by its outcome, not by the error: operating
-    // systems report these races differently (macOS answers a rename racing a removal with
-    // EINVAL, Linux with ENOENT or ENOTEMPTY).
-    let moved_to = |r: std::io::Result<()>, from: &std::path::Path, to: &std::path::Path| match r {
-        Ok(()) => Ok(()),
-        Err(_) if !from.exists() && to.exists() => Ok(()),
-        Err(e) => Err(Error::Io(e.to_string())),
-    };
-    let gone = |r: std::io::Result<()>, path: &std::path::Path| match r {
-        Ok(()) => Ok(()),
-        Err(_) if !path.exists() => Ok(()),
-        Err(e) => Err(Error::Io(e.to_string())),
-    };
-    let created = |r: std::io::Result<()>, path: &std::path::Path| match r {
-        Ok(()) => Ok(()),
-        Err(_) if path.is_dir() => Ok(()),
-        Err(e) => Err(Error::Io(e.to_string())),
-    };
-    let mut moved = Vec::new();
-    // Data first: `x~3Ay.lance` becomes `x=3Ay.lance`.
-    for n in old.iter().filter(|n| n.contains('~')) {
-        let Some(table) = n.strip_suffix(".lance").and_then(|s| unescape(s, b'~')) else {
-            continue;
-        };
-        let to = base.join(format!("{}.lance", encode(&table)));
-        if !to.exists() {
-            let from = base.join(n);
-            moved_to(std::fs::rename(&from, &to), &from, &to)?;
-        }
-        moved.push(table);
-    }
-    // Then tags Lance filed under `x%7E3Ay.lance/_refs`: into the table's own `_refs`.
-    for n in old.iter().filter(|n| n.contains('%')) {
-        let tilde = n.replace("%7E", "~").replace("%7e", "~");
-        let Some(table) = tilde.strip_suffix(".lance").and_then(|s| unescape(s, b'~')) else {
-            continue;
-        };
-        let from = base.join(n).join("_refs").join("tags");
-        let to = base
-            .join(format!("{}.lance", encode(&table)))
-            .join("_refs")
-            .join("tags");
-        if let Ok(rd) = std::fs::read_dir(&from) {
-            created(std::fs::create_dir_all(&to), &to)?;
-            for e in rd.flatten() {
-                let dst = to.join(e.file_name());
-                if !dst.exists() {
-                    moved_to(std::fs::rename(e.path(), &dst), &e.path(), &dst)?;
-                }
-            }
-        }
-        let stray = base.join(n);
-        gone(std::fs::remove_dir_all(&stray), &stray)?;
-    }
-    Ok(moved)
 }
 
 pub(crate) const DIR: &str = "records";
 
-/// Every row of the legacy table (of `table`, or all), in append order.
-pub(crate) async fn read_legacy(root: &Root, table: Option<&str>) -> Result<Vec<Record>> {
-    let ds = match root
-        .table(
-            root.legacy_records(),
-            RECORDS.clone(),
-            false,
-            None,
-            NO_MARKS,
-        )
-        .await
-    {
-        Ok(ds) => ds,
-        Err(Error::NotFound(_)) => return Ok(Vec::new()),
-        Err(e) => return Err(e),
-    };
-    let scan = Scan {
-        filter: table.map(|t| Pred::eq("table_name", t)),
-        ..Scan::all()
-    };
-    let batches = ds.scan(scan).await?;
-    let mut out = Vec::new();
-    for b in &batches {
-        let (seq, tbl, run, item, data, at) = arrays(b)?;
-        for i in 0..b.num_rows() {
-            out.push(Record {
-                table: tbl.value(i).to_string(),
-                item_id: item.value(i).to_string(),
-                run_id: (!run.is_null(i)).then(|| run.value(i).to_string()),
-                data: serde_json::from_str(data.value(i))
-                    .map_err(|e| Error::Corruption(e.to_string()))?,
-                seq: seq_from_i64(seq.value(i)),
-                created_at: at.value(i),
-            });
-        }
-    }
-    out.sort_by_key(|r| r.seq);
-    Ok(out)
-}
-
-/// Deletes the legacy table. Returns whether there was one.
-pub(crate) async fn drop_legacy(root: &Root) -> Result<bool> {
-    match root
-        .table(
-            root.legacy_records(),
-            RECORDS.clone(),
-            false,
-            None,
-            NO_MARKS,
-        )
-        .await
-    {
-        Ok(_) => {}
-        Err(Error::NotFound(_)) => return Ok(false),
-        Err(e) => return Err(e),
-    }
-    root.remove(root.legacy_records()).await?;
-    Ok(true)
-}
-
-/// Records tables carry no writer marks; this only fills the parameter.
-const NO_MARKS: std::time::Duration = std::time::Duration::from_secs(30 * 24 * 3600);
-
-pub(crate) async fn open(
-    root: &Root,
-    table: &str,
-    create: bool,
-    retention: Option<std::time::Duration>,
-    mark_ttl: std::time::Duration,
-) -> Result<TableRef> {
+pub(crate) async fn open(root: &Root, table: &str, create: bool) -> Result<TableRef> {
     if table.is_empty() {
         return Err(Error::InvalidArgument(
             "a records table needs a name".into(),
         ));
     }
-    root.table(
-        &format!("{DIR}/{}", encode(table)),
-        RECORDS.clone(),
-        create,
-        retention,
-        mark_ttl,
-    )
-    .await
+    root.table(&format!("{DIR}/{}", encode(table)), RECORDS.clone(), create)
+        .await
 }
 
 /// Names of the tables stored under `root`.

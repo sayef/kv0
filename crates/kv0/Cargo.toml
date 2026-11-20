@@ -1,6 +1,6 @@
 [package]
 name = "kv0"
-description = "Ordered key-value store and experiment-tracking tables on Lance: local disk, S3, GCS, Azure or memory"
+description = "Ordered key-value store and experiment-tracking tables on object storage, with moraine (Delta Lake): local disk, S3 or memory"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,7 +10,7 @@ repository.workspace = true
 homepage.workspace = true
 documentation = "https://docs.rs/kv0"
 readme = "../../README.md"
-keywords = ["key-value", "lance", "object-storage", "experiment-tracking", "database"]
+keywords = ["key-value", "delta-lake", "object-storage", "experiment-tracking", "database"]
 categories = ["database-implementations", "data-structures"]
 exclude = ["tests/", "examples/", "benches/"]
 
@@ -19,45 +19,28 @@ all-features = true
 
 [features]
 default = ["aws", "gcp", "azure"]
-# Object store backends, passed through to Lance. Local files and `memory://` are always available.
-aws = ["lance/aws"]
-gcp = ["lance/gcp"]
-azure = ["lance/azure"]
-# The Delta Lake engine (delta-rs without DataFusion) for the key-value layer, next to Lance. Off
-# by default while both engines coexist. Cargo cannot enable a dependency only when two features
-# are on, so `delta` builds all three object-store handlers and registers those whose feature
-# (`aws`, `gcp`, `azure`) is on.
-delta = [
-    "dep:deltalake-core",
-    "dep:deltalake-aws",
-    "dep:deltalake-gcp",
-    "dep:deltalake-azure",
-    "dep:url",
-    "dep:async-trait",
-]
-# `kv0 migrate`: converts locations written with the Lance engine (kv0 0.1.0-beta.2 and earlier)
-# to Delta Lake (`kv0::migrate`, and the `kv0` binary). Off by default.
-lance-migrate = ["delta"]
+# Object store backends. They enable nothing today: local files, `memory://` and S3 (including
+# S3-compatible servers) are always built into kv0 and moraine. Google Cloud Storage and Azure
+# Blob Storage are not supported by moraine yet, so `gs://` and `az://` locations fail with
+# `NotSupported` whichever features are on. I kept the three names so that builds that select
+# them keep compiling, and so that each can turn on a backend once there is one.
+aws = []
+gcp = []
+azure = []
 
 [dependencies]
-lance = { version = "14.0.2", default-features = false }
-lance-index = { version = "=14.0.2", default-features = false }
-arrow-array = { version = "58", features = ["ffi"] }
-arrow-schema = "58"
-# Arrow 59, the version of the Delta Lake engine; batches cross over the C data interface
-# (storage/arrow_bridge.rs).
-arrow-array-59 = { package = "arrow-array", version = "59", features = ["ffi"] }
-# Delta Lake, pinned exactly: delta-rs builds on a vendor fork of the Delta kernel, so upgrades
-# go in their own pull requests. Arrow and Parquet 59 come from its re-exports.
-deltalake-core = { version = "=1.1.4", default-features = false, features = ["rustls"], optional = true }
-deltalake-aws = { version = "=1.0.0", default-features = false, features = ["rustls"], optional = true }
-deltalake-gcp = { version = "=1.0.0", default-features = false, features = ["rustls"], optional = true }
-deltalake-azure = { version = "=1.0.0", default-features = false, features = ["rustls"], optional = true }
-url = { version = "2", optional = true }
-# Implementing delta-rs's ObjectStore trait (the fault-injecting store of the test hooks).
-async-trait = { version = "0.1", optional = true }
+# moraine, published on crates.io as `morainedb`; its library is named `moraine`.
+moraine = { package = "morainedb", version = "0.1.0-beta.2" }
+# Arrow and Parquet at the versions moraine builds with.
+arrow-array = "59"
+arrow-schema = "59"
 # Filtering record batches (records folding).
-arrow-select = "58"
+arrow-select = "59"
+# Key-value scans read moraine's data files directly, numbering their rows.
+parquet = { version = "59", default-features = false, features = ["arrow", "async", "object_store"] }
+object_store = { version = "0.13.2", default-features = false, features = ["aws", "fs"] }
+# Implementing object_store's trait (the fault-injecting store of the test hooks).
+async-trait = "0.1"
 bytes = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 futures = { version = "0.3", default-features = false, features = ["std"] }
@@ -73,11 +56,6 @@ xxhash-rust = { version = "0.8", features = ["xxh3"] }
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
-
-[[bin]]
-name = "kv0"
-path = "src/bin/kv0.rs"
-required-features = ["lance-migrate"]
 
 [[bench]]
 name = "kv"

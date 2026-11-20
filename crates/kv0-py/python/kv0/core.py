@@ -60,8 +60,8 @@ class Options:
     Recognised options:
 
     * ``create_if_missing`` (default ``True``)
-    * ``storage_options``: dict of object-store options passed to Lance, such as
-      ``aws_endpoint``, ``aws_region`` or ``allow_http``
+    * ``storage_options``: dict of object-store options, such as ``aws_endpoint``,
+      ``aws_region`` or ``allow_http``
     * ``write_buffer_size``: flush after this many buffered bytes (default 4 MiB)
     * ``flush_interval``: seconds between background flushes; ``None`` disables (default 5)
     * ``refresh_interval``: seconds between checks for other writers' commits; ``None``
@@ -76,8 +76,8 @@ class Options:
       disables snapshots (default 100 000)
     * ``version_retention``: delete versions older than this many seconds automatically (default 7
       days); ``None`` keeps every version
-    * ``orphan_grace``: seconds before version cleanup and purge delete a data file that no
-      version references, such as a crashed writer's uncommitted file (default one hour)
+    * ``orphan_grace``: accepted and ignored; data files that no version references (a crashed
+      writer's uncommitted file) are deleted by moraine's vacuum after its grace period
     * ``wal``: log every write to a local write-ahead log before acknowledging it, so buffered
       writes survive a process crash (default ``True``)
     * ``wal_sync``: ``"none"`` (never fsync), ``"batch"`` (fsync about every 100 ms, default) or
@@ -87,10 +87,9 @@ class Options:
     * ``mark_ttl``: seconds compaction keeps another writer's WAL mark (default 30 days)
     * ``replay_stale_wal``: replay a write-ahead log older than ``mark_ttl`` whose writer's mark
       has expired; its writes may then be stored twice (default ``False``: the open fails)
-    * ``version``: open this storage version read-only (time travel)
-    * ``engine``: storage engine of a database created here, ``"lance"`` or ``"delta"``; an
-      existing database always opens with its own engine, and naming another one fails
-      (default: ``KV0_ENGINE``, else Lance)
+    * ``version``: open this storage version read-only: the latest version or a tagged one
+    * ``engine``: storage engine of a database created here; only ``"moraine"`` (the default).
+      A database written by an earlier kv0 with the Lance or Delta Lake engine is refused
     """
 
     def __init__(self, create_if_missing: bool = True, **kwargs):
@@ -131,7 +130,7 @@ class WriteBatch:
 
 
 class DB(_DB):
-    """Ordered key-value database stored in Lance.
+    """Ordered key-value database stored in a moraine database (Delta Lake tables).
 
     ``db_path`` is a local directory or an object-store URI. Extra keyword arguments override
     the matching ``Options`` attributes (for example ``storage_options={...}``).
