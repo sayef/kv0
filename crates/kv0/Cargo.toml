@@ -29,8 +29,8 @@ gcp = []
 azure = []
 
 [dependencies]
-# moraine, from a local checkout of its main branch until it is published.
-morainedb = "0.1.0-beta.2"
+# moraine, published on crates.io as `morainedb`; its library is named `moraine`.
+moraine = { package = "morainedb", version = "0.1.0-beta.2" }
 # Arrow and Parquet at the versions moraine builds with.
 arrow-array = "59"
 arrow-schema = "59"
