@@ -32,7 +32,7 @@ azure = []
 # moraine, published on crates.io as `morainedb`; its library is named `moraine`.
 moraine = { package = "morainedb", version = "0.1.0-beta.2" }
 # Arrow and Parquet at the versions moraine builds with.
-arrow-array = "59"
+arrow-array = "60"
 arrow-schema = "59"
 # Filtering record batches (records folding).
 arrow-select = "59"
