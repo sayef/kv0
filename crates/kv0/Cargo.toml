@@ -38,7 +38,7 @@ arrow-schema = "59"
 arrow-select = "59"
 # Key-value scans read moraine's data files directly, numbering their rows.
 parquet = { version = "59", default-features = false, features = ["arrow", "async", "object_store"] }
-object_store = { version = "0.13.2", default-features = false, features = ["aws", "fs"] }
+object_store = { version = "0.14.2", default-features = false, features = ["aws", "fs"] }
 # Implementing object_store's trait (the fault-injecting store of the test hooks).
 async-trait = "0.1"
 bytes = "1"
