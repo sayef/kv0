@@ -12,6 +12,13 @@ updates:
       rust:
         patterns: ["*"]
         update-types: [minor, patch]
+    # kv0 passes Arrow record batches to and from moraine, so Arrow and Parquet follow the major
+    # version morainedb builds with; they move together with moraine, not on their own.
+    ignore:
+      - dependency-name: "arrow*"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "parquet"
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: github-actions
     directory: /
     schedule:
