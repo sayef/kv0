@@ -35,7 +35,7 @@ moraine = { package = "morainedb", version = "0.1.0-beta.2" }
 arrow-array = "59"
 arrow-schema = "59"
 # Filtering record batches (records folding).
-arrow-select = "59"
+arrow-select = "60"
 # Key-value scans read moraine's data files directly, numbering their rows.
 parquet = { version = "59", default-features = false, features = ["arrow", "async", "object_store"] }
 object_store = { version = "0.13.2", default-features = false, features = ["aws", "fs"] }
