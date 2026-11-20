@@ -2629,7 +2629,7 @@ dependencies = [
 
 [[package]]
 name = "kv0"
-version = "0.1.0-beta.3"
+version = "0.1.0-beta.4"
 dependencies = [
  "arrow-array",
  "arrow-schema",
@@ -2654,7 +2654,7 @@ dependencies = [
 
 [[package]]
 name = "kv0-py"
-version = "0.1.0-beta.3"
+version = "0.1.0-beta.4"
 dependencies = [
  "kv0",
  "libmimalloc-sys",
