@@ -33,7 +33,7 @@ azure = []
 moraine = { package = "morainedb", version = "0.1.0-beta.2" }
 # Arrow and Parquet at the versions moraine builds with.
 arrow-array = "59"
-arrow-schema = "59"
+arrow-schema = "60"
 # Filtering record batches (records folding).
 arrow-select = "59"
 # Key-value scans read moraine's data files directly, numbering their rows.
